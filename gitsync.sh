@@ -1,7 +1,7 @@
 #!/bin/bash
 # Interactive Git script for managing GitHub pushes and reverts
 # Run from the root of your Git repository
-
+#
 # Ensure we're in a Git repository
 if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
     echo "Error: This directory is not a Git repository. Please navigate to your project root."
