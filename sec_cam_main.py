@@ -47,7 +47,8 @@ from transfer_manager import TransferManager
 
 # PENDING: These will be updated in future sessions to use api_client
 # from mjpeg_server import MJPEGServer        # Future session
-
+from mjpeg_server import MJPEGServer
+from camera_control_api import CameraControlAPI
 
 class SecurityCameraSystem:
     """
@@ -71,7 +72,8 @@ class SecurityCameraSystem:
         self.motion_detector = None  # Session 1B-4: ACTIVE
         self.event_processor = None  # Session 1B-5: ACTIVE
         self.transfer_manager = None # Session 1B-7: ACTIVE
-        
+        self.api_server = None  # Session 8.5: ACTIVE
+
         # PENDING: These components will be added in future sessions
         # self.mjpeg_server = None      # Future session
 
@@ -157,7 +159,7 @@ class SecurityCameraSystem:
             log("✓ Motion Detector: ACTIVE (Session 1B-4)", level="INFO")
             log("✓ Event Processor: ACTIVE (Session 1B-5)", level="INFO")
             log("✓ Transfer Manager: ACTIVE (Session 1B-7)", level="INFO")
-            log("⚠ MJPEG Server: PENDING Future Session", level="WARNING")
+            log("✓ MJPEG Server: ACTIVE (Session 8.5)", level="INFO")
             log("="*60, level="INFO")
             log("", level="INFO")
             log("System Status:", level="INFO")
@@ -195,12 +197,14 @@ class SecurityCameraSystem:
             )
             log("✓ Transfer manager initialized", level="INFO")
             
-            # COMMENTED OUT - Future session will update MJPEGServer
-            # log("Initializing MJPEG server...")
-            # self.mjpeg_server = MJPEGServer(
-            #     self.circular_buffer,
-            #     self.api_client  # Changed from self.db
-            # )
+            self.mjpeg_server = MJPEGServer(
+                circular_buffer=self.circular_buffer
+            )
+            
+            self.api_server = CameraControlAPI(
+                circular_buffer=self.circular_buffer,
+                mjpeg_server=self.mjpeg_server
+            )
 
             log("Core initialization complete")
             return True
@@ -260,9 +264,9 @@ class SecurityCameraSystem:
             self.transfer_manager.start()
             log("✓ Transfer manager started", level="INFO")
             
-            # COMMENTED OUT - Future session: MJPEG Server
-            # log("Starting MJPEG server...")
-            # self.mjpeg_server.start()
+            # Session 8.5: MJPEG Server
+            log("Starting MJPEG server...")
+            self.api_server.start()
             
             # COMMENTED OUT - Watchdog references self.db which no longer exists
             # self.start_camera_watchdog()
@@ -347,10 +351,10 @@ class SecurityCameraSystem:
                 self.transfer_manager.stop()
                 log("✓ Transfer manager stopped", level="INFO")
             
-            # COMMENTED OUT - Future session: MJPEG Server
-            # if self.mjpeg_server:
-            #     log("Stopping MJPEG server...")
-            #     self.mjpeg_server.stop()
+            # Future session: MJPEG Server
+            if self.api_server:
+                 log("Stopping MJPEG server...")
+                 self.api_server.stop()
             
             # Stop circular buffer (camera)
             if self.circular_buffer:

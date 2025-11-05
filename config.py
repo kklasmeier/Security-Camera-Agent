@@ -248,6 +248,25 @@ class Config:
         # Maximum time to wait for threads to stop cleanly
         self.SHUTDOWN_TIMEOUT_SECONDS = 10
     
+        # ====================================================================
+        # CAMERA CONTROL API (Session 8.5)
+        # ====================================================================
+        # Flask-based HTTP API for remote control of camera streaming
+        # Central server calls these endpoints to start/stop livestreaming
+
+        self.API_CONTROL_HOST = '0.0.0.0'  # Listen on all interfaces
+        self.API_CONTROL_PORT = 5000        # Control API port
+
+        # Capture interval modes
+        # PICTURE_CAPTURE_INTERVAL is the "active" interval used by circular buffer
+        # It switches between NORMAL and STREAMING modes based on streaming state
+        self.NORMAL_CAPTURE_INTERVAL = 0.5      # Normal motion detection mode
+        self.STREAMING_CAPTURE_INTERVAL = 0.1   # Fast mode during livestream (10fps)
+
+        # Note: PICTURE_CAPTURE_INTERVAL remains at 0.5s as default
+        # When streaming starts, it's changed to STREAMING_CAPTURE_INTERVAL
+        # When streaming stops, it's restored to NORMAL_CAPTURE_INTERVAL
+
     def reload(self):
         """
         Reload configuration (stub for future API implementation).
