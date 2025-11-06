@@ -202,6 +202,20 @@ class CircularBuffer:
             
             # Start camera
             self.picam2.start()
+            # -------------------------------------------------------------------
+            # Enable continuous autofocus for IMX708_WIDE (Camera Module 3)
+            # -------------------------------------------------------------------
+            try:
+                from libcamera import controls
+                # Set autofocus mode to continuous and trigger initial focus
+                self.picam2.set_controls({
+                    "AfMode": controls.AfModeEnum.Continuous,
+                    "AfTrigger": controls.AfTriggerEnum.Start
+                })
+                log("Autofocus enabled: Continuous mode", level="INFO")
+            except Exception as e:
+                log(f"Autofocus not supported or failed to initialize: {e}", level="WARNING")
+            # -------------------------------------------------------------------
             
             # Camera warmup
             log(f"Camera warming up ({config.CAMERA_WARMUP_SECONDS}s)...")

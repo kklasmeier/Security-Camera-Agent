@@ -67,6 +67,8 @@ class EventProcessor:
         # State tracking
         self.running = False
         self.processor_thread = None
+        self._paused = False  # Initialize pause state
+        self._pause_lock = threading.Lock()  # Thread-safe pause control
         
         log(f"EventProcessor initialized: pending_dir={self.pending_dir}")
     
@@ -97,12 +99,14 @@ class EventProcessor:
 
     def pause(self):
         """Pause event processing to allow for camera recovery."""
-        self._paused = True
+        with self._pause_lock:
+            self._paused = True
         log("[WATCHDOG] EventProcessor paused.")
 
     def resume(self):
         """Resume event processing after camera recovery."""
-        self._paused = False
+        with self._pause_lock:
+            self._paused = False
         log("[WATCHDOG] EventProcessor resumed.")
 
     def _processing_loop(self):
@@ -120,7 +124,10 @@ class EventProcessor:
         while self.running:
             try:
                 # === WATCHDOG PAUSE GUARD ===
-                if getattr(self, "_paused", False):
+                with self._pause_lock:
+                    is_paused = self._paused
+                
+                if is_paused:
                     time.sleep(0.5)
                     continue
 
@@ -129,7 +136,10 @@ class EventProcessor:
                 event_data = self.motion_event.wait_and_get()
 
                 # If we were paused while waiting, skip this event safely
-                if getattr(self, "_paused", False):
+                with self._pause_lock:
+                    is_paused = self._paused
+                
+                if is_paused:
                     log("[WATCHDOG] EventProcessor resumed; discarding stale event.")
                     continue
 

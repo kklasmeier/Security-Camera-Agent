@@ -59,6 +59,8 @@ class MotionDetector:
         self.running = False
         self.last_detection_time = 0
         self.detection_thread = None
+        self._paused = False  # Initialize pause state
+        self._pause_lock = threading.Lock()  # Thread-safe pause control
         
         # Debug mode (optional)
         self.debug_mode = False
@@ -109,7 +111,10 @@ class MotionDetector:
                 current_time = time.time()
 
                 # === WATCHDOG PAUSE GUARD ===
-                if getattr(self, "_paused", False):
+                with self._pause_lock:
+                    is_paused = self._paused
+                
+                if is_paused:
                     time.sleep(0.5)
                     continue
 
@@ -320,12 +325,14 @@ class MotionDetector:
 
     def pause(self):
         """Pause motion detection (used during streaming)."""
-        self._paused = True
+        with self._pause_lock:
+            self._paused = True
         log("[WATCHDOG] MotionDetector paused.")
 
     def resume(self):
         """Resume motion detection (used after streaming)."""
-        self._paused = False
+        with self._pause_lock:
+            self._paused = False
         log("[WATCHDOG] MotionDetector resumed.")
 
 

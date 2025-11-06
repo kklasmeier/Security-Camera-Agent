@@ -1,0 +1,39 @@
+# ==============================================================
+# Security Camera Agent - Python Dependencies
+# ==============================================================
+# Compatible with Raspberry Pi OS Bullseye / Bookworm (aarch64)
+# ==============================================================
+# To install:
+#     pip install -r requirements.txt
+# ==============================================================
+
+# ---- Core Networking & API Communication ----
+requests>=2.31.0
+
+# ---- Web Server / Camera Control API ----
+Flask>=3.0.3
+
+# ---- Image & Video Processing ----
+opencv-python>=4.9.0.80
+Pillow>=10.0.0
+numpy>=1.26.0
+
+# ---- Raspberry Pi Camera Interface ----
+# Picamera2 depends on libcamera (install via apt on Raspberry Pi OS)
+picamera2>=0.3.15
+libcamera>=0.1      # typically preinstalled on Pi OS
+libcamera-apps>=0.1 # for command-line tools (optional)
+
+# ---- System Monitoring ----
+psutil>=5.9.8
+
+# ---- Optional Utilities ----
+typing-extensions>=4.10.0   # For forward-compatible type hints
+pytest>=8.0.0               # For running test scripts
+
+# ---- Notes ----
+# Flask-CORS can be added if remote browsers will control streams:
+# flask-cors>=4.0.0
+#
+# If you run on non-Raspberry Pi (e.g., x86 test environment),
+# you can comment out picamera2/libcamera and use mock inputs instead.
