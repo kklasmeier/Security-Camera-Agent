@@ -14,6 +14,7 @@ MODIFIED: Session 1B-4 - Now uses APIClient instead of local database
 """
 import gc
 import time
+import threading
 import cv2
 import numpy as np
 from datetime import datetime
@@ -72,8 +73,6 @@ class MotionDetector:
         """
         Start motion detection loop in background thread.
         """
-        import threading
-        
         self.running = True
         self.detection_thread = threading.Thread(
             target=self._detection_loop,

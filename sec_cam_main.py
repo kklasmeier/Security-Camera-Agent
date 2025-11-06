@@ -182,11 +182,12 @@ class SecurityCameraSystem:
             # Link motion detector to circular buffer for streaming control
             self.circular_buffer.set_motion_detector(self.motion_detector)
             
-            # Session 1B-5: Initialize event processor (no database parameter)
+            # Session 1B-5: Initialize event processor with api_client
             log("Initializing event processor...")
             self.event_processor = EventProcessor(
                 self.circular_buffer,
-                self.motion_event  # REMOVED: database parameter
+                self.motion_event,
+                self.api_client  # NEW: Add api_client for status updates
             )
             log("✓ Event processor initialized", level="INFO")
             
@@ -203,7 +204,8 @@ class SecurityCameraSystem:
             
             self.api_server = CameraControlAPI(
                 circular_buffer=self.circular_buffer,
-                mjpeg_server=self.mjpeg_server
+                mjpeg_server=self.mjpeg_server,
+                event_processor=self.event_processor  # NEW: Add event_processor reference
             )
 
             log("Core initialization complete")

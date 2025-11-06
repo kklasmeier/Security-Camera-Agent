@@ -49,16 +49,18 @@ class EventProcessor:
         processor.stop()
     """
     
-    def __init__(self, circular_buffer, motion_event):
+    def __init__(self, circular_buffer, motion_event, api_client):
         """
         Initialize event processor.
         
         Args:
             circular_buffer: CircularBuffer instance for video/image access
             motion_event: MotionEvent instance for receiving signals from Thread 2
+            api_client: APIClient instance for status updates
         """
         self.buffer = circular_buffer
         self.motion_event = motion_event
+        self.api_client = api_client
         
         # Local pending directory for staging files before transfer
         self.pending_dir = Path(config.PENDING_DIR)
@@ -69,6 +71,12 @@ class EventProcessor:
         self.processor_thread = None
         self._paused = False  # Initialize pause state
         self._pause_lock = threading.Lock()  # Thread-safe pause control
+        
+        # Abort control
+        self.abort_flag = threading.Event()
+        self.processing_lock = threading.Lock()
+        self.current_event_id = None  # Track what we're processing
+        self.is_processing_flag = False
         
         log(f"EventProcessor initialized: pending_dir={self.pending_dir}")
     
@@ -108,6 +116,64 @@ class EventProcessor:
         with self._pause_lock:
             self._paused = False
         log("[WATCHDOG] EventProcessor resumed.")
+
+    def is_processing(self) -> bool:
+        """
+        Check if currently processing an event.
+        Thread-safe check.
+        
+        Returns:
+            bool: True if processing, False if idle
+        """
+        with self.processing_lock:
+            return self.is_processing_flag
+
+    def abort_current_event(self, timeout: float = 5.0) -> bool:
+        """
+        Request abort of current event processing.
+        
+        Sets abort flag and waits for graceful completion.
+        
+        Args:
+            timeout: Maximum time to wait for abort (seconds)
+        
+        Returns:
+            bool: True if aborted successfully, False if timeout
+        
+        Behavior:
+        - Sets abort_flag immediately
+        - Waits up to timeout for processing to complete
+        - Returns True when processing finishes
+        - Returns False if timeout expires (event may still be processing)
+        """
+        # Check if actually processing
+        with self.processing_lock:
+            if not self.is_processing_flag:
+                log("Abort requested but no event is being processed")
+                return True  # Nothing to abort
+        
+        log(f"Abort requested for event {self.current_event_id}")
+        
+        # Set abort flag
+        self.abort_flag.set()
+        
+        # Wait for processing to complete (poll every 0.1s)
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            with self.processing_lock:
+                if not self.is_processing_flag:
+                    # Processing completed
+                    self.abort_flag.clear()  # Clear for next event
+                    elapsed = time.time() - start_time
+                    log(f"Event abort completed successfully in {elapsed:.2f}s")
+                    return True
+            
+            time.sleep(0.1)  # Poll every 100ms
+        
+        # Timeout reached
+        log(f"Event abort timed out after {timeout}s", level="WARNING")
+        self.abort_flag.clear()  # Clear anyway to prevent affecting future events
+        return False
 
     def _processing_loop(self):
         """
@@ -151,8 +217,19 @@ class EventProcessor:
                 log(f"Timestamp: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}", level="INFO")
                 log(f"{"="*60}", level="INFO")
 
-                # Process the event with timed sequence
-                self._process_event(event_id, timestamp)
+                # Set processing state
+                with self.processing_lock:
+                    self.is_processing_flag = True
+                    self.current_event_id = event_id
+                
+                try:
+                    # Process the event with timed sequence
+                    self._process_event(event_id, timestamp)
+                finally:
+                    # Clear processing state
+                    with self.processing_lock:
+                        self.is_processing_flag = False
+                        self.current_event_id = None
 
                 log(f"Event {event_id} processing complete")
 
@@ -170,6 +247,8 @@ class EventProcessor:
         Process motion event by saving files to pending directory.
         Creates sentinel files after each write to signal transfer readiness.
         
+        Abort checks are performed at each phase to enable quick response to streaming requests.
+        
         Args:
             event_id: Event ID from central server (integer)
             timestamp: Datetime object of motion detection time
@@ -178,11 +257,18 @@ class EventProcessor:
         timestamp_str = timestamp.strftime("%Y%m%d_%H%M%S")
         
         start_time = time.time()
+        files_saved = []  # Track what we successfully saved
         
         try:
             # ================================================================
-            # T+0s: Save Picture A
+            # PHASE 1: Picture A
             # ================================================================
+            # CHECK ABORT BEFORE PICTURE A
+            if self.abort_flag.is_set():
+                log(f"Event {event_id}: Aborted before Picture A", level="WARNING")
+                self._handle_abort(event_id, files_saved)
+                return
+            
             image_a_filename = f"{event_id}_{timestamp_str}_a.jpg"
             image_a_path = self.pending_dir / image_a_filename
             
@@ -194,10 +280,17 @@ class EventProcessor:
             sentinel_a = Path(str(image_a_path) + ".READY")
             sentinel_a.touch()
             log(f"Event {event_id}: Picture A ready for transfer", level="INFO")
+            files_saved.append("image_a")
             
             # ================================================================
-            # T+0s: Save Thumbnail
+            # PHASE 2: Thumbnail
             # ================================================================
+            # CHECK ABORT BEFORE THUMBNAIL
+            if self.abort_flag.is_set():
+                log(f"Event {event_id}: Aborted after Picture A", level="WARNING")
+                self._handle_abort(event_id, files_saved)
+                return
+            
             thumbnail_filename = f"{event_id}_{timestamp_str}_thumb.jpg"
             thumbnail_path = self.pending_dir / thumbnail_filename
             
@@ -209,19 +302,32 @@ class EventProcessor:
             sentinel_thumb = Path(str(thumbnail_path) + ".READY")
             sentinel_thumb.touch()
             log(f"Event {event_id}: Thumbnail ready for transfer", level="INFO")
+            files_saved.append("thumbnail")
             
             # Clean up memory after images
             gc.collect()
             
             # ================================================================
-            # T+4s: Wait for Picture B timing
+            # PHASE 3: Wait 4 seconds
             # ================================================================
             log(f"Event {event_id}: Waiting 4 seconds for Picture B...", level="INFO")
-            time.sleep(4.0)
+            # CHECK ABORT DURING WAIT (every 0.5s)
+            for i in range(8):  # 8 x 0.5s = 4s
+                if self.abort_flag.is_set():
+                    log(f"Event {event_id}: Aborted during 4s wait", level="WARNING")
+                    self._handle_abort(event_id, files_saved)
+                    return
+                time.sleep(0.5)
             
             # ================================================================
-            # T+4s: Save Picture B
+            # PHASE 4: Picture B
             # ================================================================
+            # CHECK ABORT BEFORE PICTURE B
+            if self.abort_flag.is_set():
+                log(f"Event {event_id}: Aborted before Picture B", level="WARNING")
+                self._handle_abort(event_id, files_saved)
+                return
+            
             image_b_filename = f"{event_id}_{timestamp_str}_b.jpg"
             image_b_path = self.pending_dir / image_b_filename
             
@@ -233,28 +339,48 @@ class EventProcessor:
             sentinel_b = Path(str(image_b_path) + ".READY")
             sentinel_b.touch()
             log(f"Event {event_id}: Picture B ready for transfer", level="INFO")
+            files_saved.append("image_b")
             
             # Clean up memory after images
             gc.collect()
             
             # ================================================================
-            # T+4-35s: Save Video (H.264 only, no MP4 conversion)
+            # PHASE 5: Video
             # ================================================================
+            # CHECK ABORT BEFORE VIDEO
+            if self.abort_flag.is_set():
+                log(f"Event {event_id}: Aborted before video", level="WARNING")
+                self._handle_abort(event_id, files_saved)
+                return
+            
             video_filename = f"{event_id}_{timestamp_str}_video.h264"
             video_path = self.pending_dir / video_filename
             
             log(f"Event {event_id}: Saving video (H.264)...", level="INFO")
             
             # Save video as raw H.264 (no MP4 conversion)
+            # Pass abort_flag through to circular buffer
             # Returns estimated duration in seconds
-            duration = self.buffer.save_h264(str(video_path))
+            duration = self.buffer.save_h264(str(video_path), abort_flag=self.abort_flag)
             
+            # Check if aborted during video save
+            if self.abort_flag.is_set():
+                log(f"Event {event_id}: Aborted during video save (partial video saved)", level="WARNING")
+                # Video file exists but may be partial
+                sentinel_video = Path(str(video_path) + ".READY")
+                sentinel_video.touch()
+                files_saved.append("video_partial")
+                self._handle_abort(event_id, files_saved)
+                return
+            
+            # Normal completion - video finished
             log(f"Event {event_id}: Video saved: {video_filename} (~{duration:.1f}s)", level="INFO")
             
             # Create sentinel file
             sentinel_video = Path(str(video_path) + ".READY")
             sentinel_video.touch()
             log(f"Event {event_id}: Video ready for transfer", level="INFO")
+            files_saved.append("video")
             
             # Clean up memory after video
             gc.collect()
@@ -276,6 +402,27 @@ class EventProcessor:
             import traceback
             log(traceback.format_exc(), level="ERROR")
             # Event partially processed - files without sentinels won't be transferred
+    
+    def _handle_abort(self, event_id, files_saved):
+        """
+        Handle abort cleanup and status update.
+        
+        Args:
+            event_id: Event being aborted
+            files_saved: List of files successfully saved (for logging)
+        """
+        log(f"Event {event_id}: ABORTED - saved {len(files_saved)} files: {files_saved}", 
+            level="WARNING")
+        
+        # Update event status to "interrupted"
+        if self.api_client:
+            success = self.api_client.update_event_status(event_id, "interrupted")
+            if success:
+                log(f"Event {event_id}: Status updated to 'interrupted'")
+            else:
+                log(f"Event {event_id}: Failed to update status (best-effort)", level="WARNING")
+        else:
+            log(f"Event {event_id}: No API client available for status update", level="WARNING")
     
     def _create_thumbnail(self, source_image_path, thumbnail_path):
         """

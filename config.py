@@ -97,6 +97,11 @@ class Config:
         # Safety mechanism - if buffer doesn't fill to target, dump whatever we have
         self.POST_MOTION_TIMEOUT_SECONDS = 60
         
+        # Abort timeout: maximum time to wait for event processing to abort (seconds)
+        # When live streaming is requested during event processing, wait up to this long
+        # Even flushing a large video buffer should complete within 2-3 seconds
+        self.ABORT_TIMEOUT_SECONDS = 5.0
+        
         # Total event duration is variable (capacity-driven for both pre and post)
         # Typical: 20-30s (pre-buffer) + 28-30s (post-buffer) = 48-60s total
         

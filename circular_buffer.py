@@ -242,7 +242,7 @@ class CircularBuffer:
             self.stop()
             raise RuntimeError(f"Failed to start camera: {e}")
 
-    def save_event_with_continuation(self, filepath_h264, target_fill_percent=0.95, timeout_seconds=60):
+    def save_event_with_continuation(self, filepath_h264, target_fill_percent=0.95, timeout_seconds=60, abort_flag=None):
         """
         Save pre-motion buffer + post-motion buffer using capacity-driven approach.
         
@@ -260,6 +260,7 @@ class CircularBuffer:
             filepath_h264 (str): Output H.264 file path
             target_fill_percent (float): Target buffer fill (0.0-1.0), default 0.95
             timeout_seconds (int): Maximum wait time for buffer to fill, default 60
+            abort_flag (threading.Event, optional): Flag to check for abort during wait
             
         Returns:
             float: Estimated video duration in seconds (calculated from file size and bitrate)
@@ -341,7 +342,7 @@ class CircularBuffer:
                 gc.collect()
                 
                 # ================================================================
-                # PHASE 3: Wait for buffer to refill
+                # PHASE 3: Wait for buffer to refill (WITH ABORT CHECK)
                 # ================================================================
                 log(f"Phase 3: Waiting for post-motion buffer to fill...")
                 
@@ -349,6 +350,14 @@ class CircularBuffer:
                 last_log_time = start_time
                 
                 while time.time() - start_time < timeout_seconds:
+                    # ===== NEW: CHECK FOR ABORT =====
+                    if abort_flag and abort_flag.is_set():
+                        current_size = len(self.circular_output._circular)
+                        log(f"ABORT: Flushing partial post-motion buffer "
+                            f"({current_size}/{target_chunks} chunks)", level="WARNING")
+                        break  # Exit immediately, proceed to Phase 4 with what we have
+                    # ================================
+                    
                     current_size = len(self.circular_output._circular)
                     
                     # Log progress every 5 seconds
@@ -757,7 +766,7 @@ class CircularBuffer:
             log(f"Error saving H.264 buffer: {e}", level="ERROR")
             raise
 
-    def save_h264(self, output_path):
+    def save_h264(self, output_path, abort_flag=None):
         """
         Save event video as raw H.264 file using continuation recording.
         
@@ -772,6 +781,7 @@ class CircularBuffer:
         
         Args:
             output_path: Path to save .h264 file
+            abort_flag: Optional threading.Event to check for abort during video save
         
         Returns:
             float: Estimated video duration in seconds
@@ -783,11 +793,13 @@ class CircularBuffer:
             log(f"Saving H.264 video with continuation: {output_path}")
             
             # Use save_event_with_continuation to get pre + post buffer
+            # Pass abort_flag through
             # This returns estimated duration
             estimated_duration = self.save_event_with_continuation(
                 output_path,
                 target_fill_percent=config.POST_MOTION_BUFFER_FILL_PERCENT,
-                timeout_seconds=config.POST_MOTION_TIMEOUT_SECONDS
+                timeout_seconds=config.POST_MOTION_TIMEOUT_SECONDS,
+                abort_flag=abort_flag  # NEW: Pass through abort flag
             )
             
             # Verify file was created

@@ -10,6 +10,7 @@ All event creation, file tracking, and logging now goes through REST API calls.
 Retry Strategy:
 - register_camera(): Retry forever (camera can't operate without registration)
 - create_event(): Retry forever (events are critical, can't be lost)
+- update_event_status(): Retry 3x with backoff (best-effort, event exists, just updating status)
 - update_file(): Retry 3x with backoff (best-effort, files already on NFS)
 - send_logs(): Single attempt (best-effort, local logging as fallback)
 - check_health(): Single attempt (informational only)
@@ -252,6 +253,70 @@ class APIClient:
             if delay > 0:
                 log(f"Retrying event creation in {delay} seconds...", level="INFO")
                 time.sleep(delay)
+    
+    def update_event_status(self, event_id: int, status: str) -> bool:
+        """
+        Update event status on central server.
+        
+        BEST-EFFORT OPERATION: Retries 3 times with backoff.
+        Status updates are important but not critical enough to block forever.
+        Events already exist in database, we're just updating status field.
+        
+        Retry strategy: 1s, 5s delays (similar to send_logs)
+        
+        Args:
+            event_id: Event ID to update
+            status: New status ("complete", "interrupted", "failed")
+        
+        Returns:
+            bool: True if updated successfully, False if failed after retries
+        """
+        # Lazy import to avoid circular dependency
+        from logger import log
+        
+        payload = {
+            "status": status
+        }
+        
+        max_retries = 3
+        retry_delays = [1, 5]
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                log(f"Updating event status: event_id={event_id}, status={status} (attempt {attempt})", 
+                    level="DEBUG")
+                
+                response = self.session.patch(
+                    f"{self.base_url}/events/{event_id}/status",
+                    json=payload,
+                    timeout=self.timeout
+                )
+                
+                if response.status_code in [200, 201]:
+                    log(f"Event status updated: event_id={event_id}, status={status}", level="INFO")
+                    return True
+                else:
+                    log(f"Event status update failed (attempt {attempt}): HTTP {response.status_code} - {response.text}", 
+                        level="WARNING")
+            
+            except requests.exceptions.Timeout:
+                log(f"Event status update timeout (attempt {attempt}): event_id={event_id}", 
+                    level="WARNING")
+            
+            except requests.exceptions.RequestException as e:
+                log(f"Event status update failed (attempt {attempt}): {e}", level="WARNING")
+            
+            except Exception as e:
+                log(f"Unexpected error updating event status (attempt {attempt}): {e}", level="ERROR")
+            
+            # Retry with delay (but not after last attempt)
+            if attempt < max_retries:
+                delay = retry_delays[attempt - 1]
+                time.sleep(delay)
+        
+        log(f"Event status update failed after {max_retries} attempts: event_id={event_id}, status={status}", 
+            level="WARNING")
+        return False
     
     def update_file(self, event_id: int, file_type: str, file_path: str,
                     transferred: bool = True, video_duration: Optional[float] = None) -> bool:
@@ -521,6 +586,11 @@ if __name__ == "__main__":
             video_duration=30.5
         )
         print(f"    Result: {success}")
+        
+        # Test 4.5: Event status update (NEW)
+        print("\n  Testing event status update...")
+        success = client.update_event_status(event_id, "interrupted")
+        print(f"    Status update result: {success}")
     
     # Test 5: Log sending
     print("\n" + "-"*60)
@@ -566,6 +636,7 @@ if __name__ == "__main__":
     if event_id:
         print(f"     - Event record: event_id={event_id}")
         print(f"     - File records: 4 files for event {event_id}")
+        print(f"     - Event status: 'interrupted'")
     print(f"     - Log entries: {len(logs)} logs from {client.camera_id}")
     print("  2. Verify all data is correct")
-    print("  3. Ready for Session 1B-3 (Camera Registration on Startup)")
+    print("  3. Ready for integration testing")

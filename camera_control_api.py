@@ -33,18 +33,21 @@ class CameraControlAPI:
     - Status queries
     """
     
-    def __init__(self, circular_buffer, mjpeg_server):
+    def __init__(self, circular_buffer, mjpeg_server, event_processor):
         """
         Initialize API server.
         
         Args:
             circular_buffer: CircularBuffer instance for streaming control
             mjpeg_server: MJPEGServer instance for HTTP server control
+            event_processor: EventProcessor instance for abort control
         """
         self.circular_buffer = circular_buffer
         self.mjpeg_server = mjpeg_server
+        self.event_processor = event_processor
         self.start_time = time.time()
         self.streaming = False  # Track streaming state
+        self.transitioning = False  # Track state transitions
         
         # Create Flask app
         self.app = Flask(__name__)
@@ -99,7 +102,7 @@ class CameraControlAPI:
         @self.app.route('/api/stream', methods=['POST'])
         def control_stream():
             """
-            Control streaming state.
+            Control streaming state with abort support.
             
             Query Parameters:
                 action: 'start' or 'stop'
@@ -115,6 +118,14 @@ class CameraControlAPI:
                     'message': "Invalid action parameter. Use 'start' or 'stop'."
                 }), 400
             
+            # ===== CHECK IF TRANSITIONING =====
+            if self.transitioning:
+                return jsonify({
+                    'success': False,
+                    'message': 'Stream state change in progress, try again in 1 second'
+                }), 409
+            # ==================================
+            
             if action == 'start':
                 # Check if already streaming
                 if self.streaming:
@@ -123,9 +134,29 @@ class CameraControlAPI:
                         'message': 'Stream already running.'
                     }), 400
                 
-                log("API: Starting streaming mode")
-                
                 try:
+                    # ===== SET TRANSITION STATE =====
+                    self.transitioning = True
+                    log("API: Starting streaming mode (transition started)")
+                    # ================================
+                    
+                    # ===== CHECK AND ABORT EVENT PROCESSING =====
+                    if self.event_processor.is_processing():
+                        log("API: Event processing in progress - initiating abort")
+                        
+                        # Request abort and wait for completion
+                        abort_success = self.event_processor.abort_current_event(
+                            timeout=config.ABORT_TIMEOUT_SECONDS
+                        )
+                        
+                        if not abort_success:
+                            log(f"API: Event abort timed out after {config.ABORT_TIMEOUT_SECONDS}s", 
+                                level="WARNING")
+                            # Continue anyway - streaming is priority
+                        else:
+                            log("API: Event processing aborted successfully")
+                    # ==============================================
+                    
                     # Start streaming sequence
                     # 1. Start circular buffer streaming (fast capture, pause motion)
                     self.circular_buffer.start_streaming()
@@ -163,6 +194,12 @@ class CameraControlAPI:
                         'success': False,
                         'message': f'Failed to start streaming: {str(e)}'
                     }), 500
+                
+                finally:
+                    # ===== CLEAR TRANSITION STATE =====
+                    self.transitioning = False
+                    log("API: Streaming mode transition complete")
+                    # ==================================
             
             else:  # action == 'stop'
                 # Check if not streaming
@@ -172,9 +209,12 @@ class CameraControlAPI:
                         'message': 'Stream is not running.'
                     }), 400
                 
-                log("API: Stopping streaming mode")
-                
                 try:
+                    # ===== SET TRANSITION STATE =====
+                    self.transitioning = True
+                    log("API: Stopping streaming mode (transition started)")
+                    # ================================
+                    
                     # Stop streaming sequence
                     # 1. Stop MJPEG HTTP server
                     self.mjpeg_server.stop_http_server()
@@ -210,6 +250,12 @@ class CameraControlAPI:
                         'success': False,
                         'message': f'Failed to stop streaming cleanly: {str(e)}'
                     }), 500
+                
+                finally:
+                    # ===== CLEAR TRANSITION STATE =====
+                    self.transitioning = False
+                    log("API: Stop streaming mode transition complete")
+                    # ==================================
     
     def start(self):
         """Start API server in background thread."""
