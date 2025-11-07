@@ -189,6 +189,9 @@ class TransferManager:
         """
         Process a single sentinel file.
         
+        UPDATED: Now only deletes LOCAL files after transfer.
+        Sentinel remains on NFS for converter to use.
+        
         Args:
             sentinel_path: Path to .READY sentinel file
         
@@ -217,23 +220,26 @@ class TransferManager:
         
         log(f"Processing transfer: event_id={event_id}, type={file_type}, file={file_path.name}", level="INFO")
         
-        # Attempt transfer
+        # Attempt transfer (now transfers both data file AND sentinel to NFS)
         success = self._transfer_file(file_path, file_info)
         
         if success:
-            # Transfer succeeded - cleanup
+            # Transfer succeeded - cleanup LOCAL files only
+            # Sentinel remains on NFS for converter
             log(f"Transfer successful: {file_path.name}", level="INFO")
             
-            # Delete local file and sentinel
+            # Delete local file and local sentinel
             file_path.unlink()
             sentinel_path.unlink()
+            
+            log(f"Local files cleaned up: {file_path.name} and sentinel", level="DEBUG")
             
             return True
         else:
             # Transfer failed - will retry next loop
             log(f"Transfer failed: {file_path.name} (will retry)", level="WARNING")
-            return False
-    
+            return False    
+        
     def _parse_filename(self, filename: str) -> Optional[Dict]:
         """
         Parse filename to extract metadata.
@@ -323,85 +329,96 @@ class TransferManager:
             log(f"NFS mount check failed: {e}", level="DEBUG")
             return False
     
-    def _transfer_file(self, local_path: Path, file_info: Dict) -> bool:
+    def _transfer_file(self, file_path: Path, file_info: Dict) -> bool:
         """
-        Transfer file to NFS with atomic rename.
+        Transfer a file from local pending to NFS.
+        
+        NOW ALSO TRANSFERS THE .READY SENTINEL FILE.
+        
+        Uses atomic rename to prevent partial files on NFS.
         
         Args:
-            local_path: Path to local file
-            file_info: Dict from _parse_filename()
+            file_path: Path to local file
+            file_info: Parsed filename metadata
         
         Returns:
-            True if transfer succeeded, False if failed
+            True if transfer succeeded, False otherwise
         """
+        # Check NFS is mounted
+        if not self._check_nfs_mounted():
+            log("NFS not mounted - deferring transfer", level="WARNING")
+            return False
+        
         event_id = file_info['event_id']
-        file_type = file_info['file_type']
         dest_subdir = file_info['dest_subdir']
-        original_filename = file_info['original_filename']
+        
+        # Destination paths
+        dest_dir = self.camera_nfs_dir / dest_subdir
+        dest_file = dest_dir / file_path.name
+        temp_file = dest_file.with_suffix(dest_file.suffix + '.tmp')
+        
+        # Sentinel paths (both local and NFS)
+        local_sentinel = Path(str(file_path) + ".READY")
+        dest_sentinel = Path(str(dest_file) + ".READY")
+        temp_sentinel = Path(str(temp_file) + ".READY")
         
         try:
-            # Check NFS mounted
-            if not self._check_nfs_mounted():
-                log(f"NFS not mounted, cannot transfer {original_filename}", level="WARNING")
-                return False
+            # Transfer data file
+            log(f"Transferring: {file_path.name} -> {dest_subdir}/", level="DEBUG")
             
-            # Build destination path
-            # Format: {NFS_BASE}/{camera_id}/{dest_subdir}/{original_filename}
-            # Example: /mnt/footage/camera_1/pictures/42_20251030_143022_a.jpg
-            dest_dir = self.camera_nfs_dir / dest_subdir
-            dest_path = dest_dir / original_filename
+            # Copy to .tmp (atomic operation prep)
+            shutil.copy2(file_path, temp_file)
             
-            # Ensure destination directory exists
-            dest_dir.mkdir(parents=True, exist_ok=True)
+            # Atomic rename
+            temp_file.rename(dest_file)
             
-            # Step 1: Copy to temporary file (atomic operation prevention)
-            temp_path = dest_path.with_suffix(dest_path.suffix + '.tmp')
-            
-            log(f"Copying {local_path.name} to NFS...", level="DEBUG")
-            
-            # Copy with timeout protection
-            start_time = time.time()
-            shutil.copy2(local_path, temp_path)
-            elapsed = time.time() - start_time
-            
-            if elapsed > self.transfer_timeout:
-                log(f"Transfer timeout ({elapsed:.1f}s > {self.transfer_timeout}s)", level="WARNING")
-                if temp_path.exists():
-                    temp_path.unlink()
-                return False
-            
-            # Step 2: Atomic rename (file appears complete or not at all)
-            temp_path.rename(dest_path)
-            
-            # Calculate file size for statistics
-            file_size = local_path.stat().st_size
+            # Update statistics
+            file_size = file_path.stat().st_size
             self.total_bytes_transferred += file_size
             
-            log(f"Copied to NFS: {original_filename} ({file_size/(1024*1024):.2f}MB in {elapsed:.2f}s)", level="INFO")
+            log(f"Data file transferred: {file_path.name} ({file_size} bytes)", level="DEBUG")
             
-            # Step 3: Notify central server API (best effort)
-            # Build relative path for API (include camera_id for central server tracking)
-            nfs_relative_path = f"{self.camera_id}/{dest_subdir}/{original_filename}"
+            # NOW ALSO TRANSFER THE SENTINEL FILE
+            # This signals to the converter that the file is ready to process
+            if local_sentinel.exists():
+                try:
+                    # Copy sentinel to .tmp
+                    shutil.copy2(local_sentinel, temp_sentinel)
+                    
+                    # Atomic rename
+                    temp_sentinel.rename(dest_sentinel)
+                    
+                    log(f"Sentinel transferred: {local_sentinel.name}", level="DEBUG")
+                except Exception as e:
+                    log(f"Failed to transfer sentinel {local_sentinel.name}: {e}", level="WARNING")
+                    # Don't fail the whole transfer - data file is more important
+                    # Converter can fall back to time-based check if needed
             
-            api_success = self._notify_api(event_id, file_type, nfs_relative_path)
-            if not api_success:
-                log(f"API notification failed (non-critical)", level="WARNING")
-                # Don't fail the transfer - file is on NFS, that's what matters
+            # Notify central API (best effort)
+            try:
+                self.api_client.update_file(
+                    event_id=event_id,
+                    file_type=file_info['file_type'],
+                    file_path=f"{self.camera_id}/{dest_subdir}/{file_path.name}"
+                )
+                log(f"API notified: event_id={event_id}, type={file_info['file_type']}", level="DEBUG")
+            except Exception as e:
+                # API failure is non-critical - file is already on NFS
+                log(f"API notification failed (non-critical): {e}", level="WARNING")
             
             return True
         
         except Exception as e:
-            log(f"Transfer failed: {original_filename}: {e}", level="ERROR")
+            log(f"Transfer failed: {file_path.name}: {e}", level="ERROR")
             
-            # Cleanup temporary file if exists
-            if 'temp_path' in locals() and temp_path.exists():
-                try:
-                    temp_path.unlink()
-                except:
-                    pass
+            # Cleanup temp files if they exist
+            if temp_file.exists():
+                temp_file.unlink()
+            if temp_sentinel.exists():
+                temp_sentinel.unlink()
             
-            return False
-    
+            return False    
+        
     def _notify_api(self, event_id: int, file_type: str, nfs_path: str) -> bool:
         """
         Notify central server that file was transferred.

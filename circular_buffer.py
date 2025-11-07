@@ -611,8 +611,15 @@ class CircularBuffer:
             gc.collect()
 
     def capture_color_still(self, filepath):
-        from PIL import Image
+        """
+        Capture a full-color still image for A/B snapshots.
+
+        - Uses the ISP's JPEG pipeline for accurate color and tone (same as video).
+        - Falls back to capture_array() + Pillow if capture_file() fails.
+        - Has no effect on the continuous motion-detection capture loop.
+        """
         import gc
+        from PIL import Image
         import numpy as np
         import cv2
 
@@ -621,29 +628,46 @@ class CircularBuffer:
                 raise RuntimeError("Camera not initialized")
 
             log(f"[DEBUG] capture_color_still start: {filepath}")
-            color_frame = self.picam2.capture_array("main")
-            log(f"[DEBUG] dtype={color_frame.dtype}, shape={color_frame.shape}")
 
-            # If grayscale (2D), convert to color using OpenCV
-            if len(color_frame.shape) == 2:
-                log("[DEBUG] Detected grayscale frame — converting to RGB for color snapshot")
-                color_frame = cv2.cvtColor(color_frame, cv2.COLOR_GRAY2RGB)
+            try:
+                # ✅ Preferred path: full ISP JPEG (hardware-processed)
+                self.picam2.capture_file(filepath, format="jpeg")
+                log(f"Saved COLOR still (ISP processed): {filepath}")
+                return
 
-            # Validate and normalize
-            if color_frame.dtype != np.uint8:
-                color_frame = color_frame.astype(np.uint8)
+            except Exception as e:
+                # 🚨 Fallback path: legacy raw array -> Pillow JPEG
+                log(f"[WARNING] capture_file() failed ({e}); using fallback capture_array() method.")
 
-            img = Image.fromarray(color_frame, mode="RGB")
-            img.save(filepath, "JPEG", quality=int(config.JPEG_QUALITY))
-            log(f"Saved COLOR still: {filepath}")
+                color_frame = self.picam2.capture_array("main")
+                log(f"[DEBUG] dtype={color_frame.dtype}, shape={color_frame.shape}")
+
+                # Handle grayscale fallback
+                if len(color_frame.shape) == 2:
+                    log("[DEBUG] Detected grayscale frame — converting to RGB for color snapshot")
+                    color_frame = cv2.cvtColor(color_frame, cv2.COLOR_GRAY2RGB)
+
+                # Normalize to 8-bit if needed
+                if color_frame.dtype != np.uint8:
+                    color_frame = color_frame.astype(np.uint8)
+
+                img = Image.fromarray(color_frame, mode="RGB")
+                img.save(filepath, "JPEG", quality=int(config.JPEG_QUALITY))
+                log(f"Saved COLOR still (fallback raw method): {filepath}")
 
         except Exception as e:
             log(f"Error capturing color still: {e}", level="ERROR")
             raise
+
         finally:
-            if 'img' in locals():
-                img.close()
+            # Clean up memory aggressively since stills can be large
+            if "img" in locals():
+                try:
+                    img.close()
+                except Exception:
+                    pass
             gc.collect()
+
 
     def get_latest_frame_for_livestream(self):
         """
