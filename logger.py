@@ -90,10 +90,11 @@ class APILogger:
         if level not in ["INFO", "WARNING", "ERROR", "DEBUG"]:
             level = "INFO"
         
-        # Queue for batch sending to API
-        self.log_queue.put((timestamp, level, message))
+        # Only queue INFO/WARNING/ERROR for API
+        if level in ["INFO", "WARNING", "ERROR"]:
+            self.log_queue.put((timestamp, level, message))
         
-        # Also print to console immediately for real-time monitoring
+        # Always print to console (including DEBUG)
         timestamp_str = timestamp.strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{timestamp_str}] [{level}] {message}")
     

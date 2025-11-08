@@ -244,6 +244,10 @@ class SecurityCameraSystem:
             
             # Step 1: Start circular buffer (camera and H.264 recording)
             log("Starting circular buffer (camera)...")
+            if not self.circular_buffer:
+                log("Circular buffer not initialized; aborting startup", level="ERROR")
+                print("\n✗ Startup failed: circular buffer is not initialized\n")
+                return False
             self.circular_buffer.start()
             log("✓ Circular buffer started", level="INFO")
             
@@ -253,21 +257,37 @@ class SecurityCameraSystem:
             
             # Session 1B-4: Start motion detector
             log("Starting motion detector...")
+            if not self.motion_detector:
+                log("Motion detector not initialized; aborting startup", level="ERROR")
+                print("\n✗ Startup failed: motion detector is not initialized\n")
+                return False
             self.motion_detector.start()
             log("✓ Motion detector started", level="INFO")
             
             # Session 1B-5: Start event processor
             log("Starting event processor...")
+            if not self.event_processor:
+                log("Event processor not initialized; aborting startup", level="ERROR")
+                print("\n✗ Startup failed: event processor is not initialized\n")
+                return False
             self.event_processor.start()
             log("✓ Event processor started", level="INFO")
             
             # Session 1B-7: Start transfer manager
             log("Starting transfer manager...")
+            if not self.transfer_manager:
+                log("Transfer manager not initialized; aborting startup", level="ERROR")
+                print("\n✗ Startup failed: transfer manager is not initialized\n")
+                return False
             self.transfer_manager.start()
             log("✓ Transfer manager started", level="INFO")
             
             # Session 8.5: MJPEG Server
             log("Starting MJPEG server...")
+            if not self.api_server:
+                log("API server not initialized; aborting startup", level="ERROR")
+                print("\n✗ Startup failed: API server is not initialized\n")
+                return False
             self.api_server.start()
             
             # COMMENTED OUT - Watchdog references self.db which no longer exists

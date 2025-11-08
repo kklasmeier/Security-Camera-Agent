@@ -21,8 +21,8 @@ numpy>=1.26.0
 # ---- Raspberry Pi Camera Interface ----
 # Picamera2 depends on libcamera (install via apt on Raspberry Pi OS)
 picamera2>=0.3.15
-libcamera>=0.1      # typically preinstalled on Pi OS
-libcamera-apps>=0.1 # for command-line tools (optional)
+#libcamera>=0.1      # typically preinstalled on Pi OS
+#libcamera-apps>=0.1 # for command-line tools (optional)
 
 # ---- System Monitoring ----
 psutil>=5.9.8

@@ -63,7 +63,9 @@ class BoundedCircularOutput(CircularOutput):
         # Constant eviction at max capacity is normal circular buffer behavior
         
         # Now add the new frame using parent's logic
-        return super().outputframe(frame, keyframe, timestamp, packet, audio)
+        # Ensure 'audio' is a bool to match parent signature (None -> False)
+        audio_flag = bool(audio) if audio is not None else False
+        return super().outputframe(frame, keyframe, timestamp, packet, audio_flag)
 
 class CircularBuffer:
     """
@@ -206,7 +208,10 @@ class CircularBuffer:
             # Enable continuous autofocus for IMX708_WIDE (Camera Module 3)
             # -------------------------------------------------------------------
             try:
-                from libcamera import controls
+                import libcamera
+                controls = getattr(libcamera, 'controls', None)
+                if controls is None:
+                    raise ImportError("libcamera.controls not found")
                 # Set autofocus mode to continuous and trigger initial focus
                 self.picam2.set_controls({
                     "AfMode": controls.AfModeEnum.Continuous,
@@ -273,7 +278,17 @@ class CircularBuffer:
         
         try:
             # Quick health check
-            current_chunks = len(self.circular_output._circular)
+            # Ensure encoder and circular buffer are initialized before accessing internals
+            if not getattr(self, "circular_output", None) or getattr(self.circular_output, "_circular", None) is None:
+                raise RuntimeError("Circular buffer not initialized or encoder not started")
+            
+            # Safe access: avoid static-analysis / runtime errors if attributes are missing
+            circ = getattr(self, "circular_output", None)
+            circ_store = getattr(circ, "_circular", None)
+            if circ_store is None:
+                raise RuntimeError("Circular buffer not initialized or encoder not started")
+            
+            current_chunks = len(circ_store)
             utilization = (current_chunks / max_chunks) * 100
             
             log(f"Starting save: buffer at {current_chunks}/{max_chunks} "
@@ -294,7 +309,7 @@ class CircularBuffer:
                 log("Phase 1: Dumping pre-motion buffer...")
 
                 # Shallow snapshot (references only, not data)
-                chunks_snapshot = tuple(self.circular_output._circular)
+                chunks_snapshot = tuple(circ_store) if circ_store is not None else tuple()
                 pre_chunk_count = 0
                 found_keyframe = False
 
@@ -336,7 +351,8 @@ class CircularBuffer:
                 log("Phase 2: Clearing buffer...")
                 
                 # Clear the circular buffer - encoder keeps running and refills it
-                self.circular_output._circular.clear()
+                if circ_store is not None:
+                    circ_store.clear()
                 
                 log(f"Buffer cleared, waiting for {target_chunks} chunks ({target_fill_percent*100:.0f}% fill)...")
                 gc.collect()
@@ -352,18 +368,18 @@ class CircularBuffer:
                 while time.time() - start_time < timeout_seconds:
                     # ===== NEW: CHECK FOR ABORT =====
                     if abort_flag and abort_flag.is_set():
-                        current_size = len(self.circular_output._circular)
+                        current_size = len(circ_store) if circ_store is not None else 0
                         log(f"ABORT: Flushing partial post-motion buffer "
                             f"({current_size}/{target_chunks} chunks)", level="WARNING")
                         break  # Exit immediately, proceed to Phase 4 with what we have
                     # ================================
                     
-                    current_size = len(self.circular_output._circular)
+                    current_size = len(circ_store) if circ_store is not None else 0
                     
                     # Log progress every 5 seconds
                     if time.time() - last_log_time >= 5.0:
                         elapsed = time.time() - start_time
-                        percent = (current_size / target_chunks) * 100
+                        percent = (current_size / target_chunks) * 100 if target_chunks > 0 else 0
                         log(f"Buffer filling: {current_size}/{target_chunks} chunks "
                             f"({percent:.1f}%) - {elapsed:.1f}s elapsed")
                         last_log_time = time.time()
@@ -379,9 +395,10 @@ class CircularBuffer:
                 else:
                     # Timeout reached
                     elapsed = time.time() - start_time
-                    current_size = len(self.circular_output._circular)
+                    current_size = len(circ_store) if circ_store is not None else 0
+                    percent = (current_size/target_chunks)*100 if target_chunks > 0 else 0
                     log(f"WARNING: Timeout after {elapsed:.1f}s - buffer only at {current_size}/{target_chunks} chunks "
-                        f"({(current_size/target_chunks)*100:.1f}%)", level="WARNING")
+                        f"({percent:.1f}%)", level="WARNING")
                     log("Dumping whatever we have...", level="WARNING")
                 
                 # ================================================================
@@ -390,7 +407,7 @@ class CircularBuffer:
                 log("Phase 4: Dumping post-motion buffer...")
                 
                 # Shallow snapshot of post-motion buffer
-                chunks_snapshot = tuple(self.circular_output._circular)
+                chunks_snapshot = tuple(circ_store) if circ_store is not None else tuple()
                 post_chunk_count = 0
                 found_keyframe = False
                 
@@ -479,7 +496,13 @@ class CircularBuffer:
                     log(f"[CAPTURE DEBUG] Interval changed: {last_logged_interval}s -> {self.capture_interval}s")
                     last_logged_interval = self.capture_interval
                 
-                # Capture frame
+                # Capture frame (ensure camera initialized)
+                if self.picam2 is None:
+                    # Picamera2 not yet initialized; wait briefly and retry to avoid attribute errors
+                    log("capture_array skipped: picam2 not initialized yet, waiting...", level="WARNING")
+                    time.sleep(0.1)
+                    continue
+
                 frame = self.picam2.capture_array()
                 self.last_frame_time = time.time()
                 frame_count += 1
@@ -767,13 +790,20 @@ class CircularBuffer:
         Save buffer WITHOUT stopping encoder (zero-copy, no fragmentation).
         """
         import gc
+        import os
         
         try:
             chunk_count = 0
             
+            # Safely obtain the internal circular store; fail early if not available
+            circ = getattr(self, "circular_output", None)
+            circ_store = getattr(circ, "_circular", None)
+            if circ_store is None:
+                raise RuntimeError("Circular buffer not initialized or encoder not started")
+            
             with open(filepath, 'wb', buffering=0) as f:
                 # Direct iteration - no list copy, no encoder stop
-                for chunk in self.circular_output._circular:
+                for chunk in circ_store:
                     if isinstance(chunk, tuple) and len(chunk) > 0:
                         if isinstance(chunk[0], bytes):
                             f.write(chunk[0])
@@ -781,8 +811,12 @@ class CircularBuffer:
                             
                             if chunk_count % 50 == 0:
                                 f.flush()
-                                os.fsync(f.fileno())
-            
+                                try:
+                                    os.fsync(f.fileno())
+                                except Exception:
+                                    # fsync may fail on some filesystems; continue anyway
+                                    pass
+        
             log(f"Saved H.264 buffer: {filepath} ({chunk_count} chunks, no encoder restart)")
             gc.collect()
             
@@ -868,10 +902,18 @@ class CircularBuffer:
             }
         """
         try:
-            current = len(self.circular_output._circular)
-            maximum = self.circular_output.max_chunks
-            utilization = (current / maximum) * 100
-            evictions = getattr(self.circular_output, '_chunk_count', 0)
+            # Safely obtain circular_output and its internal store; return None if not initialized
+            circ = getattr(self, "circular_output", None)
+            if circ is None:
+                return None
+
+            circ_store = getattr(circ, "_circular", None)
+            maximum = getattr(circ, "max_chunks", getattr(config, "CIRCULAR_BUFFER_MAX_CHUNKS", 0))
+
+            # Guard against None or zero maximum to avoid ZeroDivisionError
+            current = len(circ_store) if circ_store is not None else 0
+            utilization = (current / maximum) * 100 if maximum > 0 else 0.0
+            evictions = getattr(circ, '_chunk_count', 0)
             
             # Determine health status
             # In capacity-driven mode, 80-100% utilization is IDEAL
@@ -896,7 +938,7 @@ class CircularBuffer:
                 'status': status,
                 'eviction_count': evictions
             }
-        except:
+        except Exception:
             return None
 
     def set_motion_detector(self, detector):

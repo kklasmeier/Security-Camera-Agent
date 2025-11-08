@@ -55,7 +55,9 @@ class MJPEGHandler(BaseHTTPRequestHandler):
         - Browsers display as continuous video
         """
         # Notify server of new client
-        self.server.mjpeg_server.client_connected()
+        mjpeg_server = getattr(self.server, "mjpeg_server", None)
+        if mjpeg_server:
+            mjpeg_server.client_connected()
         
         try:
             # Send HTTP headers
@@ -73,8 +75,13 @@ class MJPEGHandler(BaseHTTPRequestHandler):
             frame_count = 0
             
             while True:
-                # Get latest frame from circular buffer
-                frame = self.server.circular_buffer.get_latest_frame_for_livestream()
+                # Get latest frame from circular buffer (use getattr to avoid attribute access on BaseServer)
+                buffer_obj = getattr(self.server, "circular_buffer", None)
+                if buffer_obj is None:
+                    log(f"[STREAM DEBUG] No circular_buffer on server, waiting...", level="WARNING")
+                    time.sleep(0.1)
+                    continue
+                frame = buffer_obj.get_latest_frame_for_livestream()
                 
                 if frame is None:
                     log(f"[STREAM DEBUG] Frame is None, waiting...", level="WARNING")
@@ -122,11 +129,11 @@ class MJPEGHandler(BaseHTTPRequestHandler):
             log(f"Client disconnected from MJPEG stream: {self.client_address[0]}")
         except Exception as e:
             log(f"Error serving MJPEG stream: {e}", level="ERROR")
-            import traceback
-            log(f"Traceback: {traceback.format_exc()}", level="ERROR")
         finally:
             # Always notify server when client disconnects
-            self.server.mjpeg_server.client_disconnected()
+            mjpeg_server = getattr(self.server, "mjpeg_server", None)
+            if mjpeg_server:
+                mjpeg_server.client_disconnected()
     
     def log_message(self, format, *args):
         """Suppress default HTTP logging (too verbose)."""
@@ -190,8 +197,9 @@ class MJPEGServer:
         try:
             # Create server
             self.server = HTTPServer(('0.0.0.0', config.LIVESTREAM_PORT), MJPEGHandler)
-            self.server.circular_buffer = self.buffer
-            self.server.mjpeg_server = self  # Pass reference to self
+            # Use setattr to avoid static type checker errors when attaching custom attributes
+            setattr(self.server, "circular_buffer", self.buffer)
+            setattr(self.server, "mjpeg_server", self)  # Pass reference to self
             
             # Start server in background thread
             self.server_thread = threading.Thread(
@@ -220,11 +228,16 @@ class MJPEGServer:
             return
         
         try:
+            # Capture server reference to avoid race where self.server becomes None
+            server = self.server
+
             # Shutdown in separate thread to avoid blocking
             def shutdown_server():
                 try:
-                    self.server.shutdown()
-                    self.server.server_close()
+                    if server is None:
+                        return
+                    server.shutdown()
+                    server.server_close()
                 except Exception as e:
                     log(f"Error in server shutdown: {e}", level="ERROR")
             
