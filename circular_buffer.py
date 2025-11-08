@@ -247,25 +247,27 @@ class CircularBuffer:
             self.stop()
             raise RuntimeError(f"Failed to start camera: {e}")
 
-    def save_event_with_continuation(self, filepath_h264, target_fill_percent=0.95, timeout_seconds=60, abort_flag=None):
+    def save_event_with_continuation(self, filepath_h264, wait_seconds=None, timeout_seconds=None, abort_flag=None):
         """
-        Save pre-motion buffer + post-motion buffer using capacity-driven approach.
+        Save complete event video with continuous recording (single-phase approach).
         
-        Process:
-        1. Dump current buffer to disk (pre-motion footage)
-        2. Clear buffer
-        3. Wait for buffer to refill to target percentage (post-motion footage)
-        4. Dump buffer again to disk
-        5. Result: concatenated H.264 file with both pre and post motion
+        NEW APPROACH (eliminates gap):
+        1. Motion detected at T0
+        2. Wait ~30 seconds while buffer continues recording (T0 → T+30)
+        3. Dump entire buffer once (contains T-30 → T+30, ~60 seconds total)
         
-        This approach works reliably even when buffer is at 100% capacity,
-        fixing the "0 chunks captured" bug in the old time-based continuation logic.
+        Buffer holds ~60 seconds continuously, so one dump captures:
+        - Pre-event footage (T-30 to T0)
+        - During event (T0)
+        - Post-event footage (T0 to T+30)
+        
+        No gap, no buffer clear, single write operation.
         
         Args:
-            filepath_h264 (str): Output H.264 file path
-            target_fill_percent (float): Target buffer fill (0.0-1.0), default 0.95
-            timeout_seconds (int): Maximum wait time for buffer to fill, default 60
-            abort_flag (threading.Event, optional): Flag to check for abort during wait
+            filepath_h264 (str): Output path for H.264 file
+            wait_seconds (int, optional): Seconds to wait before dump (default: from config)
+            timeout_seconds (int, optional): DEPRECATED - kept for compatibility
+            abort_flag (threading.Event, optional): Check for abort during wait
             
         Returns:
             float: Estimated video duration in seconds (calculated from file size and bitrate)
@@ -273,47 +275,100 @@ class CircularBuffer:
         import os, time, gc
         from pathlib import Path
         
+        # Use config value if not specified
+        if wait_seconds is None:
+            wait_seconds = config.POST_MOTION_WAIT_SECONDS
+        
         max_chunks = config.CIRCULAR_BUFFER_MAX_CHUNKS
-        target_chunks = int(max_chunks * target_fill_percent)
         
         try:
-            # Quick health check
-            # Ensure encoder and circular buffer are initialized before accessing internals
+            # ================================================================
+            # PHASE 1: Buffer health check
+            # ================================================================
+            log("="*60)
+            log("Starting continuous buffer event save")
+            log("="*60)
+            
+            # Ensure encoder and circular buffer are initialized
             if not getattr(self, "circular_output", None) or getattr(self.circular_output, "_circular", None) is None:
                 raise RuntimeError("Circular buffer not initialized or encoder not started")
             
-            # Safe access: avoid static-analysis / runtime errors if attributes are missing
             circ = getattr(self, "circular_output", None)
             circ_store = getattr(circ, "_circular", None)
             if circ_store is None:
                 raise RuntimeError("Circular buffer not initialized or encoder not started")
             
-            current_chunks = len(circ_store)
-            utilization = (current_chunks / max_chunks) * 100
+            initial_chunks = len(circ_store)
+            initial_utilization = (initial_chunks / max_chunks) * 100
             
-            log(f"Starting save: buffer at {current_chunks}/{max_chunks} "
-                f"chunks ({utilization:.1f}% full)")
+            log(f"Phase 1: Buffer health check")
+            log(f"  Buffer size: {initial_chunks}/{max_chunks} chunks ({initial_utilization:.1f}% full)")
+            log(f"  Max capacity: {max_chunks} chunks (~60 seconds)")
             
-            # Only warn if buffer is suspiciously empty (might indicate a problem)
-            if current_chunks < (max_chunks * 0.3):
-                log(f"WARNING: Buffer only {utilization:.1f}% full - may have insufficient "
-                    f"pre-motion footage", level="WARNING")
+            # Warn if buffer is suspiciously empty
+            if initial_chunks < (max_chunks * 0.5):
+                log(f"  WARNING: Buffer only {initial_utilization:.1f}% full - may have insufficient footage", 
+                    level="WARNING")
             
-            log("Starting capacity-driven save with buffer clear...")
+            # ================================================================
+            # PHASE 2: Wait for post-event recording (WITH ABORT CHECK)
+            # ================================================================
+            log(f"Phase 2: Waiting {wait_seconds}s for post-event recording...")
+            log(f"  Buffer continues recording during wait (no gap!)")
+            
+            wait_start = time.time()
+            last_log_time = wait_start
+            
+            while time.time() - wait_start < wait_seconds:
+                # Check for abort
+                if abort_flag and abort_flag.is_set():
+                    elapsed = time.time() - wait_start
+                    current_size = len(circ_store) if circ_store is not None else 0
+                    log(f"ABORT: Stopping wait after {elapsed:.1f}s, will dump partial buffer "
+                        f"({current_size} chunks)", level="WARNING")
+                    break
+                
+                # Log progress every 5 seconds
+                if time.time() - last_log_time >= 5.0:
+                    elapsed = time.time() - wait_start
+                    current_size = len(circ_store) if circ_store is not None else 0
+                    log(f"  Recording post-event: {elapsed:.1f}s / {wait_seconds}s elapsed, "
+                        f"buffer at {current_size} chunks")
+                    last_log_time = time.time()
+                
+                time.sleep(0.5)  # Check every 500ms
+            
+            wait_elapsed = time.time() - wait_start
+            final_chunks = len(circ_store) if circ_store is not None else 0
+            log(f"  Wait complete: {wait_elapsed:.1f}s elapsed, buffer now has {final_chunks} chunks")
+            
+            # ================================================================
+            # PHASE 3: Dump entire buffer (single write operation)
+            # ================================================================
+            log(f"Phase 3: Dumping entire buffer to disk...")
+            log(f"  Output: {filepath_h264}")
+            
+            dump_start = time.time()
             
             with open(filepath_h264, "wb", buffering=65536) as f:  # 64KB buffer
                 
-                # ================================================================
-                # PHASE 1: Dump pre-motion buffer
-                # ================================================================
-                log("Phase 1: Dumping pre-motion buffer...")
-
-                # Shallow snapshot (references only, not data)
+                # Take shallow snapshot of buffer
                 chunks_snapshot = tuple(circ_store) if circ_store is not None else tuple()
-                pre_chunk_count = 0
+                total_chunks = len(chunks_snapshot)
+                
+                log(f"  Snapshot captured: {total_chunks} chunks to write")
+                
+                # Write all chunks to disk
+                chunk_count = 0
                 found_keyframe = False
-
+                bytes_written = 0
+                
                 for chunk in chunks_snapshot:
+                    # Check for abort during write
+                    if abort_flag and abort_flag.is_set():
+                        log(f"  ABORT during write at chunk {chunk_count}/{total_chunks}", level="WARNING")
+                        break
+                    
                     if isinstance(chunk, tuple) and len(chunk) >= 2:
                         chunk_data = chunk[0]
                         is_keyframe = chunk[1] if len(chunk) > 1 else False
@@ -322,155 +377,78 @@ class CircularBuffer:
                         if not found_keyframe:
                             if is_keyframe:
                                 found_keyframe = True
-                                log(f"Starting from keyframe at chunk {pre_chunk_count}")
+                                log(f"  Starting from keyframe at chunk {chunk_count}")
                             else:
                                 continue  # Skip non-keyframe chunks at start
                         
                         # Write chunk data
                         if isinstance(chunk_data, bytes):
                             f.write(chunk_data)
-                            pre_chunk_count += 1
+                            chunk_count += 1
+                            bytes_written += len(chunk_data)
                             
-                            # Periodic flush
-                            if pre_chunk_count % 100 == 0:
+                            # Periodic flush and progress logging
+                            if chunk_count % 200 == 0:
                                 f.flush()
+                                mb_written = bytes_written / (1024 * 1024)
+                                log(f"  Progress: {chunk_count}/{total_chunks} chunks ({mb_written:.1f} MB)")
 
                 if not found_keyframe:
-                    log("WARNING: No keyframe found in buffer - video may be unplayable", level="WARNING")
-                
-                log(f"Pre-motion buffer dumped ({pre_chunk_count} chunks)")
-                
-                # Critical: release snapshot immediately
-                del chunks_snapshot
-                f.flush()
-                gc.collect()
-                
-                # ================================================================
-                # PHASE 2: Clear buffer for post-motion recording
-                # ================================================================
-                log("Phase 2: Clearing buffer...")
-                
-                # Clear the circular buffer - encoder keeps running and refills it
-                if circ_store is not None:
-                    circ_store.clear()
-                
-                log(f"Buffer cleared, waiting for {target_chunks} chunks ({target_fill_percent*100:.0f}% fill)...")
-                gc.collect()
-                
-                # ================================================================
-                # PHASE 3: Wait for buffer to refill (WITH ABORT CHECK)
-                # ================================================================
-                log(f"Phase 3: Waiting for post-motion buffer to fill...")
-                
-                start_time = time.time()
-                last_log_time = start_time
-                
-                while time.time() - start_time < timeout_seconds:
-                    # ===== NEW: CHECK FOR ABORT =====
-                    if abort_flag and abort_flag.is_set():
-                        current_size = len(circ_store) if circ_store is not None else 0
-                        log(f"ABORT: Flushing partial post-motion buffer "
-                            f"({current_size}/{target_chunks} chunks)", level="WARNING")
-                        break  # Exit immediately, proceed to Phase 4 with what we have
-                    # ================================
-                    
-                    current_size = len(circ_store) if circ_store is not None else 0
-                    
-                    # Log progress every 5 seconds
-                    if time.time() - last_log_time >= 5.0:
-                        elapsed = time.time() - start_time
-                        percent = (current_size / target_chunks) * 100 if target_chunks > 0 else 0
-                        log(f"Buffer filling: {current_size}/{target_chunks} chunks "
-                            f"({percent:.1f}%) - {elapsed:.1f}s elapsed")
-                        last_log_time = time.time()
-                    
-                    # Check if we've reached target
-                    if current_size >= target_chunks:
-                        elapsed = time.time() - start_time
-                        log(f"Buffer reached {current_size} chunks (target: {target_chunks}) "
-                            f"in {elapsed:.1f}s")
-                        break
-                    
-                    time.sleep(0.5)  # Check every 500ms
-                else:
-                    # Timeout reached
-                    elapsed = time.time() - start_time
-                    current_size = len(circ_store) if circ_store is not None else 0
-                    percent = (current_size/target_chunks)*100 if target_chunks > 0 else 0
-                    log(f"WARNING: Timeout after {elapsed:.1f}s - buffer only at {current_size}/{target_chunks} chunks "
-                        f"({percent:.1f}%)", level="WARNING")
-                    log("Dumping whatever we have...", level="WARNING")
-                
-                # ================================================================
-                # PHASE 4: Dump post-motion buffer
-                # ================================================================
-                log("Phase 4: Dumping post-motion buffer...")
-                
-                # Shallow snapshot of post-motion buffer
-                chunks_snapshot = tuple(circ_store) if circ_store is not None else tuple()
-                post_chunk_count = 0
-                found_keyframe = False
-                
-                for chunk in chunks_snapshot:
-                    if isinstance(chunk, tuple) and len(chunk) >= 2:
-                        chunk_data = chunk[0]
-                        is_keyframe = chunk[1] if len(chunk) > 1 else False
-                        
-                        # Skip chunks until we find a keyframe (ensures valid H.264 continuation)
-                        if not found_keyframe:
-                            if is_keyframe:
-                                found_keyframe = True
-                                log(f"Post-motion starting from keyframe at chunk {post_chunk_count}")
-                            else:
-                                continue  # Skip non-keyframe chunks at start
-                        
-                        # Write chunk data
-                        if isinstance(chunk_data, bytes):
-                            f.write(chunk_data)
-                            post_chunk_count += 1
-                            
-                            # Periodic flush
-                            if post_chunk_count % 100 == 0:
-                                f.flush()
-                
-                if not found_keyframe:
-                    log("WARNING: No keyframe found in post-motion buffer", level="WARNING")
-                
-                log(f"Post-motion buffer dumped ({post_chunk_count} chunks)")
-                
-                # Critical: release snapshot immediately
-                del chunks_snapshot
+                    log("  WARNING: No keyframe found in buffer - video may be unplayable", level="WARNING")
                 
                 # Final flush
                 f.flush()
                 os.fsync(f.fileno())
+                
+                # Release snapshot immediately
+                del chunks_snapshot
+            
+            dump_elapsed = time.time() - dump_start
             
             # ================================================================
-            # Verify and report
+            # PHASE 4: Verify and report with detailed metrics
             # ================================================================
+            log(f"Phase 4: Verification and metrics")
+            
             if os.path.exists(filepath_h264):
-                size_mb = os.path.getsize(filepath_h264) / (1024 * 1024)
-                total_chunks = pre_chunk_count + post_chunk_count
+                file_size = os.path.getsize(filepath_h264)
+                size_mb = file_size / (1024 * 1024)
+                
+                # Calculate write speed
+                write_speed_mbps = size_mb / dump_elapsed if dump_elapsed > 0 else 0
                 
                 # Calculate actual duration from file size and bitrate
                 size_bits = size_mb * 8 * 1024 * 1024
                 estimated_duration = size_bits / config.VIDEO_BITRATE
                 
                 # Calculate average chunk size for diagnostics
-                avg_chunk_kb = (size_mb * 1024) / total_chunks if total_chunks > 0 else 0
+                avg_chunk_kb = (size_mb * 1024) / chunk_count if chunk_count > 0 else 0
                 
-                log(f"Event saved: {size_mb:.2f} MB, {total_chunks} chunks, "
-                    f"~{estimated_duration:.1f}s duration")
-                log(f"  Pre-motion buffer: {pre_chunk_count} chunks "
-                    f"(~{(pre_chunk_count/total_chunks)*estimated_duration:.1f}s)")
-                log(f"  Post-motion buffer: {post_chunk_count} chunks "
-                    f"(~{(post_chunk_count/total_chunks)*estimated_duration:.1f}s)")
+                log("="*60)
+                log("Event save COMPLETE - Single continuous buffer dump")
+                log("="*60)
+                log(f"File metrics:")
+                log(f"  Output file: {os.path.basename(filepath_h264)}")
+                log(f"  File size: {size_mb:.2f} MB ({file_size:,} bytes)")
+                log(f"  Chunks written: {chunk_count} / {total_chunks} total")
                 log(f"  Avg chunk size: {avg_chunk_kb:.1f} KB")
+                log(f"")
+                log(f"Timing metrics:")
+                log(f"  Wait time: {wait_elapsed:.1f}s (post-event recording)")
+                log(f"  Write time: {dump_elapsed:.2f}s (disk I/O)")
+                log(f"  Write speed: {write_speed_mbps:.1f} MB/s")
+                log(f"  Total processing: {wait_elapsed + dump_elapsed:.1f}s")
+                log(f"")
+                log(f"Video metrics:")
+                log(f"  Estimated duration: {estimated_duration:.1f}s")
+                log(f"  Coverage: T-{estimated_duration/2:.0f}s → T0 (motion) → T+{estimated_duration/2:.0f}s")
+                log(f"  Bitrate: {config.VIDEO_BITRATE/1000000:.1f} Mbps")
+                log("="*60)
                 
-                # Force final cleanup
+                # Force cleanup
                 gc.collect()
                 
-                # Return estimated duration for database storage
+                # Return estimated duration
                 return estimated_duration
             else:
                 raise IOError("File not created")
@@ -479,7 +457,7 @@ class CircularBuffer:
             log(f"Error in save_event_with_continuation: {e}", level="ERROR")
             # Clean up on error
             gc.collect()
-            raise          
+            raise
 
     def _capture_pictures(self):
         import gc
@@ -712,19 +690,18 @@ class CircularBuffer:
                 return None
             return self.current_frame.copy()
 
-    def save_h264_as_mp4(self, filepath_mp4, use_continuation=True, target_fill_percent=None, timeout_seconds=None):
+    def save_h264_as_mp4(self, filepath_mp4, use_continuation=True, wait_seconds=None):
         """
         Save event as .h264 file for later MP4 conversion.
         Adds .pending marker *after* final merge and flush.
         
-        Uses capacity-driven approach: dumps pre-event buffer, clears it,
-        waits for buffer to refill to target percentage, then dumps post-event buffer.
+        Uses continuous buffer approach: waits for post-event recording,
+        then dumps entire buffer once (~60 seconds total).
         
         Args:
             filepath_mp4 (str): Desired MP4 output path (will save as .h264 initially)
             use_continuation (bool): Whether to use continuation recording (default True)
-            target_fill_percent (float, optional): Target buffer fill for post-motion
-            timeout_seconds (int, optional): Timeout for buffer fill
+            wait_seconds (int, optional): Seconds to wait for post-motion recording
             
         Returns:
             float or None: Estimated video duration in seconds, or None if use_continuation=False
@@ -736,24 +713,21 @@ class CircularBuffer:
         filepath_h264 = filepath_mp4.replace('.mp4', '.h264')
         pending_marker = filepath_h264 + ".pending"
 
-        # Use config values if not specified
-        if target_fill_percent is None:
-            target_fill_percent = config.POST_MOTION_BUFFER_FILL_PERCENT
-        if timeout_seconds is None:
-            timeout_seconds = config.POST_MOTION_TIMEOUT_SECONDS
+        # Use config value if not specified
+        if wait_seconds is None:
+            wait_seconds = config.POST_MOTION_WAIT_SECONDS
             
-        target_chunks = int(config.CIRCULAR_BUFFER_MAX_CHUNKS * target_fill_percent)
-        log(f"Using buffer fill target: {target_fill_percent*100:.0f}% ({target_chunks} chunks), timeout: {timeout_seconds}s")
+        log(f"Using post-motion wait: {wait_seconds}s")
 
         try:
             # Step 1: Write the H.264 file and get estimated duration
             estimated_duration = None
             
             if use_continuation:
-                log(f"Saving event with capacity-driven continuation (target: {target_fill_percent*100:.0f}% fill)...")
-                estimated_duration = self.save_event_with_continuation(filepath_h264, target_fill_percent, timeout_seconds)
+                log(f"Saving event with continuous buffer (wait: {wait_seconds}s)...")
+                estimated_duration = self.save_event_with_continuation(filepath_h264, wait_seconds=wait_seconds)
             else:
-                log(f"Saving buffer only (~17s)...")
+                log(f"Saving buffer only (~30s)...")
                 self.save_h264_buffer(filepath_h264)
                 # For buffer-only saves, we don't calculate duration (uncommon path)
 
@@ -826,16 +800,15 @@ class CircularBuffer:
 
     def save_h264(self, output_path, abort_flag=None):
         """
-        Save event video as raw H.264 file using continuation recording.
+        Save event video as raw H.264 file using continuous recording.
         
-        This is the NEW method for Session 1B-5 multi-camera architecture.
+        This is the method for Session 1B-5 multi-camera architecture.
         Saves raw H.264 (no MP4 conversion on camera).
         Central server will convert H.264 → MP4 in background.
         
-        Uses capacity-driven recording:
-        1. Dumps pre-event buffer contents
-        2. Waits for buffer to refill to target percentage
-        3. Dumps post-event buffer contents
+        Uses continuous buffer approach:
+        1. Wait ~30 seconds for post-event recording
+        2. Dump entire buffer once (~60 seconds total)
         
         Args:
             output_path: Path to save .h264 file
@@ -848,16 +821,15 @@ class CircularBuffer:
         import gc
         
         try:
-            log(f"Saving H.264 video with continuation: {output_path}")
+            log(f"Saving H.264 video with continuous buffer: {output_path}")
             
-            # Use save_event_with_continuation to get pre + post buffer
+            # Use save_event_with_continuation with new approach
             # Pass abort_flag through
             # This returns estimated duration
             estimated_duration = self.save_event_with_continuation(
                 output_path,
-                target_fill_percent=config.POST_MOTION_BUFFER_FILL_PERCENT,
-                timeout_seconds=config.POST_MOTION_TIMEOUT_SECONDS,
-                abort_flag=abort_flag  # NEW: Pass through abort flag
+                wait_seconds=config.POST_MOTION_WAIT_SECONDS,
+                abort_flag=abort_flag
             )
             
             # Verify file was created

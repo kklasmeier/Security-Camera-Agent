@@ -83,27 +83,24 @@ class Config:
         # CIRCULAR BUFFER SETTINGS
         # ====================================================================
         
-        # Circular buffer maintains ~17-30 seconds of pre-motion footage (capacity-driven)
-        # When motion detected, clear buffer and wait for it to refill for post-motion footage
-        # Both pre-motion and post-motion use capacity-driven approach (not time-based)
+        # Circular buffer maintains ~40-60 seconds of continuous footage (capacity-driven)
+        # When motion detected, wait ~30s then dump entire buffer for complete event coverage
+        # Buffer captures: [T-30s (pre-event) → T0 (motion) → T+30s (post-event)]
         
-        self.CIRCULAR_BUFFER_SECONDS = 20   # Target duration (approximate)
+        self.CIRCULAR_BUFFER_SECONDS = 60   # Target duration (approximate)
         
-        # Post-motion recording: wait for buffer to fill to this percentage
-        # 95% = ~950 chunks = ~28-30 seconds of footage
-        self.POST_MOTION_BUFFER_FILL_PERCENT = 0.95
-        
-        # Post-motion timeout: maximum time to wait for buffer to fill
-        # Safety mechanism - if buffer doesn't fill to target, dump whatever we have
-        self.POST_MOTION_TIMEOUT_SECONDS = 60
+        # Post-motion recording: wait this many seconds after motion detection
+        # This allows the continuous buffer to capture post-event footage
+        # With 2000-chunk buffer, we wait ~30s then dump the entire buffer
+        self.POST_MOTION_WAIT_SECONDS = 30
         
         # Abort timeout: maximum time to wait for event processing to abort (seconds)
         # When live streaming is requested during event processing, wait up to this long
         # Even flushing a large video buffer should complete within 2-3 seconds
         self.ABORT_TIMEOUT_SECONDS = 5.0
         
-        # Total event duration is variable (capacity-driven for both pre and post)
-        # Typical: 20-30s (pre-buffer) + 28-30s (post-buffer) = 48-60s total
+        # Total event processing time: ~30s wait + ~3s dump = ~33 seconds
+        # Video contains: pre-event (~30s) + during event + post-event (~30s) ≈ 60s total
         
         # ====================================================================
         # VIDEO BUFFER SETTINGS (Capacity-Driven)
@@ -114,19 +111,19 @@ class Config:
         # Actual duration will vary based on scene complexity and motion.
         # 
         # Tuning guide:
-        # - Start with 1000 chunks (typically 15-25 seconds)
+        # - Start with 2000 chunks (typically 40-60 seconds)
         # - Monitor logs to see actual durations
         # - Increase if videos too short, decrease if too long
         # 
         # At ~12KB per chunk average:
-        #   600 chunks  ≈ 7 MB  ≈ 15-20 seconds
-        #   1000 chunks ≈ 12 MB ≈ 20-30 seconds  (RECOMMENDED)
+        #   1000 chunks ≈ 12 MB ≈ 20-30 seconds
         #   1500 chunks ≈ 18 MB ≈ 30-40 seconds
-        self.CIRCULAR_BUFFER_MAX_CHUNKS = 1000
+        #   2000 chunks ≈ 24 MB ≈ 40-60 seconds  (RECOMMENDED - single continuous dump)
+        self.CIRCULAR_BUFFER_MAX_CHUNKS = 2000
         
         # Maximum memory for circular buffer (bytes)
         # Safety limit to prevent runaway memory usage
-        self.CIRCULAR_BUFFER_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
+        self.CIRCULAR_BUFFER_MAX_BYTES = 60 * 1024 * 1024  # 60 MB
         
         # NOTE: BUFFER_DURATION_SECONDS removed - now capacity-driven
         # The actual duration will be logged during operation
@@ -475,12 +472,12 @@ def print_config():
     print(f"  Bitrate:    {config.VIDEO_BITRATE/1000000:.1f} Mbps")
     print(f"  Format:     {config.VIDEO_OUTPUT_FORMAT}")
     
-    print(f"\nCircular Buffer (Capacity-Driven):")
+    print(f"\nCircular Buffer (Continuous Recording):")
     print(f"  Max chunks: {config.CIRCULAR_BUFFER_MAX_CHUNKS}")
     print(f"  Max memory: {config.CIRCULAR_BUFFER_MAX_BYTES/(1024*1024):.1f} MB")
     print(f"  Target:     ~{config.CIRCULAR_BUFFER_SECONDS}s (actual varies)")
-    print(f"  Post-motion fill target: {config.POST_MOTION_BUFFER_FILL_PERCENT*100:.0f}% (~{int(config.CIRCULAR_BUFFER_MAX_CHUNKS*config.POST_MOTION_BUFFER_FILL_PERCENT)} chunks)")
-    print(f"  Post-motion timeout: {config.POST_MOTION_TIMEOUT_SECONDS}s")
+    print(f"  Post-motion wait: {config.POST_MOTION_WAIT_SECONDS}s (continuous recording)")
+    print(f"  Estimated video length: ~{config.CIRCULAR_BUFFER_SECONDS}s (no gap!)")
     
     print(f"\nMotion Detection:")
     print(f"  Threshold:   {config.MOTION_THRESHOLD}")
