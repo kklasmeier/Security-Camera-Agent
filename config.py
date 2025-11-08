@@ -278,6 +278,13 @@ class Config:
         # It switches between NORMAL and STREAMING modes based on streaming state
         self.NORMAL_CAPTURE_INTERVAL = 0.5      # Normal motion detection mode
         self.STREAMING_CAPTURE_INTERVAL = 0.1   # Fast mode during livestream (10fps)
+        
+        # Streaming timeout and safety limits
+        self.STREAM_HEARTBEAT_TIMEOUT = 30      # Auto-stop if no heartbeat for 30 seconds
+        self.STREAM_MAX_DURATION_SECONDS = 1800 # Maximum stream duration (30 minutes)
+
+        # System version (semantic versioning)
+        self.SYSTEM_VERSION = "1.1.0"
 
         # Note: PICTURE_CAPTURE_INTERVAL remains at 0.5s as default
         # When streaming starts, it's changed to STREAMING_CAPTURE_INTERVAL
@@ -289,7 +296,7 @@ class Config:
         # Camera identity and optional settings from config_local.py
         
         self._load_local_overrides()
-    
+
     def _load_local_overrides(self):
         """
         Load and apply settings from config_local.py.

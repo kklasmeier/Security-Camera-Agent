@@ -49,6 +49,11 @@ class CameraControlAPI:
         self.streaming = False  # Track streaming state
         self.transitioning = False  # Track state transitions
         
+        # Heartbeat timeout management
+        self.heartbeat_timer = None  # Timer for heartbeat timeout
+        self.stream_start_time = None  # Timestamp when streaming started
+        self.heartbeat_lock = threading.Lock()  # Thread-safe timer management
+        
         # Create Flask app
         self.app = Flask(__name__)
         self._setup_routes()
@@ -59,6 +64,80 @@ class CameraControlAPI:
         
         log(f"CameraControlAPI initialized on port {config.API_CONTROL_PORT}")
     
+    def _start_heartbeat_timer(self):
+        """
+        Start or restart the heartbeat timeout timer.
+        Called when streaming starts or when heartbeat is received.
+        """
+        with self.heartbeat_lock:
+            # Cancel existing timer if any
+            if self.heartbeat_timer:
+                self.heartbeat_timer.cancel()
+            
+            # Start new timer
+            self.heartbeat_timer = threading.Timer(
+                config.STREAM_HEARTBEAT_TIMEOUT,
+                self._on_heartbeat_timeout
+            )
+            self.heartbeat_timer.daemon = True
+            self.heartbeat_timer.start()
+    
+    def _cancel_heartbeat_timer(self):
+        """
+        Cancel the heartbeat timeout timer.
+        Called when streaming stops normally.
+        """
+        with self.heartbeat_lock:
+            if self.heartbeat_timer:
+                self.heartbeat_timer.cancel()
+                self.heartbeat_timer = None
+    
+    def _on_heartbeat_timeout(self):
+        """
+        Called when heartbeat timer expires (no heartbeat received for 30 seconds).
+        Automatically stops streaming and resumes motion detection.
+        """
+        log("WARNING: Stream heartbeat timeout - no keepalive received for "
+            f"{config.STREAM_HEARTBEAT_TIMEOUT}s, auto-stopping stream", level="WARNING")
+        
+        # Set transitioning state
+        self.transitioning = True
+        
+        try:
+            # Stop streaming sequence
+            self.mjpeg_server.stop_http_server()
+            self.circular_buffer.stop_streaming()
+            self.streaming = False
+            self.stream_start_time = None
+            
+            log("✓ Stream auto-stopped due to heartbeat timeout")
+            
+        except Exception as e:
+            log(f"Error during heartbeat timeout auto-stop: {e}", level="ERROR")
+            # Force cleanup
+            try:
+                self.circular_buffer.stop_streaming()
+                self.mjpeg_server.stop_http_server()
+            except:
+                pass
+            self.streaming = False
+            self.stream_start_time = None
+        finally:
+            self.transitioning = False
+    
+    def _check_max_duration(self):
+        """
+        Check if streaming has exceeded maximum duration (30 minutes).
+        
+        Returns:
+            bool: True if max duration exceeded, False otherwise
+        """
+        if not self.stream_start_time:
+            return False
+        
+        elapsed = time.time() - self.stream_start_time
+        return elapsed >= config.STREAM_MAX_DURATION_SECONDS
+    
     def _setup_routes(self):
         """Setup Flask routes."""
         
@@ -68,6 +147,25 @@ class CameraControlAPI:
             return jsonify({
                 'success': True,
                 'camera_id': config.CAMERA_ID,
+                'timestamp': datetime.utcnow().isoformat() + 'Z'
+            })
+        
+        @self.app.route('/api/version', methods=['GET'])
+        def get_version():
+            """
+            Get camera version and basic info.
+            Used by central server footer to display camera status.
+            """
+            uptime = int(time.time() - self.start_time)
+            
+            return jsonify({
+                'success': True,
+                'camera_id': config.CAMERA_ID,
+                'camera_name': config.CAMERA_NAME,
+                'location': config.CAMERA_LOCATION,
+                'version': config.SYSTEM_VERSION,
+                'status': 'online',
+                'uptime_seconds': uptime,
                 'timestamp': datetime.utcnow().isoformat() + 'Z'
             })
         
@@ -102,21 +200,90 @@ class CameraControlAPI:
         @self.app.route('/api/stream', methods=['POST'])
         def control_stream():
             """
-            Control streaming state with abort support.
+            Control streaming state with abort support and heartbeat.
             
             Query Parameters:
-                action: 'start' or 'stop'
+                action: 'start', 'stop', or 'heartbeat'
             
             Returns:
                 JSON response with success status and details
             """
             action = request.args.get('action', '').lower()
             
-            if action not in ['start', 'stop']:
+            if action not in ['start', 'stop', 'heartbeat']:
                 return jsonify({
                     'success': False,
-                    'message': "Invalid action parameter. Use 'start' or 'stop'."
+                    'message': "Invalid action parameter. Use 'start', 'stop', or 'heartbeat'."
                 }), 400
+            
+            # ===== HANDLE HEARTBEAT =====
+            if action == 'heartbeat':
+                # Heartbeat can only be sent when streaming
+                if not self.streaming:
+                    return jsonify({
+                        'success': False,
+                        'message': 'No active stream to send heartbeat to.'
+                    }), 400
+                
+                # Check if max duration exceeded
+                if self._check_max_duration():
+                    log(f"WARNING: Stream exceeded maximum duration "
+                        f"({config.STREAM_MAX_DURATION_SECONDS}s), force-stopping", level="WARNING")
+                    
+                    # Set transition state
+                    self.transitioning = True
+                    
+                    try:
+                        # Cancel heartbeat timer
+                        self._cancel_heartbeat_timer()
+                        
+                        # Stop streaming
+                        self.mjpeg_server.stop_http_server()
+                        self.circular_buffer.stop_streaming()
+                        self.streaming = False
+                        self.stream_start_time = None
+                        
+                        log("✓ Stream force-stopped due to max duration exceeded")
+                        
+                        return jsonify({
+                            'success': False,
+                            'message': 'Stream exceeded maximum duration and was automatically stopped.',
+                            'max_duration_exceeded': True
+                        }), 400
+                        
+                    except Exception as e:
+                        log(f"Error stopping stream after max duration: {e}", level="ERROR")
+                        # Force cleanup
+                        try:
+                            self.circular_buffer.stop_streaming()
+                            self.mjpeg_server.stop_http_server()
+                        except:
+                            pass
+                        self.streaming = False
+                        self.stream_start_time = None
+                        
+                        return jsonify({
+                            'success': False,
+                            'message': f'Error stopping stream: {str(e)}'
+                        }), 500
+                    finally:
+                        self.transitioning = False
+                
+                # Reset heartbeat timer
+                self._start_heartbeat_timer()
+                
+                # Calculate elapsed time
+                elapsed = int(time.time() - self.stream_start_time) if self.stream_start_time else 0
+                
+                return jsonify({
+                    'success': True,
+                    'action': 'heartbeat',
+                    'message': 'Heartbeat received',
+                    'streaming': True,
+                    'elapsed_seconds': elapsed,
+                    'camera_id': config.CAMERA_ID
+                })
+            # ============================
             
             # ===== CHECK IF TRANSITIONING =====
             if self.transitioning:
@@ -164,10 +331,14 @@ class CameraControlAPI:
                     # 2. Start MJPEG HTTP server
                     self.mjpeg_server.start_http_server()
                     
-                    # 3. Update state
+                    # 3. Update state and start heartbeat timer
                     self.streaming = True
+                    self.stream_start_time = time.time()
+                    self._start_heartbeat_timer()
                     
                     log(f"✓ Streaming started on port {config.LIVESTREAM_PORT}")
+                    log(f"  Heartbeat timeout: {config.STREAM_HEARTBEAT_TIMEOUT}s")
+                    log(f"  Max duration: {config.STREAM_MAX_DURATION_SECONDS}s")
                     
                     return jsonify({
                         'success': True,
@@ -177,18 +348,22 @@ class CameraControlAPI:
                         'stream_url': f"http://{config.CAMERA_ID}:{config.LIVESTREAM_PORT}/stream.mjpg",
                         'capture_interval': config.STREAMING_CAPTURE_INTERVAL,
                         'camera_id': config.CAMERA_ID,
-                        'camera_name': config.CAMERA_NAME
+                        'camera_name': config.CAMERA_NAME,
+                        'heartbeat_timeout': config.STREAM_HEARTBEAT_TIMEOUT,
+                        'max_duration': config.STREAM_MAX_DURATION_SECONDS
                     })
                     
                 except Exception as e:
                     log(f"Error starting streaming: {e}", level="ERROR")
                     # Rollback on error
                     try:
+                        self._cancel_heartbeat_timer()
                         self.circular_buffer.stop_streaming()
                         self.mjpeg_server.stop_http_server()
                     except:
                         pass
                     self.streaming = False
+                    self.stream_start_time = None
                     
                     return jsonify({
                         'success': False,
@@ -215,6 +390,9 @@ class CameraControlAPI:
                     log("API: Stopping streaming mode (transition started)")
                     # ================================
                     
+                    # Cancel heartbeat timer
+                    self._cancel_heartbeat_timer()
+                    
                     # Stop streaming sequence
                     # 1. Stop MJPEG HTTP server
                     self.mjpeg_server.stop_http_server()
@@ -224,6 +402,7 @@ class CameraControlAPI:
                     
                     # 3. Update state
                     self.streaming = False
+                    self.stream_start_time = None
                     
                     log("✓ Streaming stopped")
                     
@@ -240,11 +419,13 @@ class CameraControlAPI:
                     log(f"Error stopping streaming: {e}", level="ERROR")
                     # Try to clean up anyway
                     try:
+                        self._cancel_heartbeat_timer()
                         self.circular_buffer.stop_streaming()
                         self.mjpeg_server.stop_http_server()
                     except:
                         pass
                     self.streaming = False
+                    self.stream_start_time = None
                     
                     return jsonify({
                         'success': False,
@@ -288,12 +469,16 @@ class CameraControlAPI:
         """Stop API server."""
         self.running = False
         
+        # Cancel heartbeat timer
+        self._cancel_heartbeat_timer()
+        
         # Ensure streaming is stopped
         if self.streaming:
             try:
                 self.mjpeg_server.stop_http_server()
                 self.circular_buffer.stop_streaming()
                 self.streaming = False
+                self.stream_start_time = None
             except Exception as e:
                 log(f"Error stopping streaming during API shutdown: {e}", level="ERROR")
         
