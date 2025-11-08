@@ -8,9 +8,20 @@ ARCHITECTURE NOTE:
 This Config class is designed for multi-camera deployment with central server.
 Phase 1B: Config reads from local variables (like current system)
 Phase 7: Config will fetch from central server API
+
+IMPORTANT: Camera Identity Override Required
+============================================
+Each camera MUST have a config_local.py file defining:
+- CAMERA_ID (unique identifier)
+- CAMERA_NAME (descriptive name)
+- CAMERA_LOCATION (physical location)
+
+This prevents accidental camera ID collisions in multi-camera deployments.
+See SETUP.md for instructions on creating config_local.py
 """
 
 import os
+import sys
 from pathlib import Path
 
 
@@ -28,7 +39,10 @@ class Config:
     
     def __init__(self):
         """
-        Initialize configuration with default values.
+        Initialize configuration with default values, then apply local overrides.
+        
+        CRITICAL: config_local.py MUST exist with camera identity settings.
+        System will refuse to start without it to prevent camera ID conflicts.
         
         Future implementation (Phase 7):
         - Fetch from central server API: GET /api/v1/cameras/{camera_id}/config
@@ -268,28 +282,131 @@ class Config:
         # Note: PICTURE_CAPTURE_INTERVAL remains at 0.5s as default
         # When streaming starts, it's changed to STREAMING_CAPTURE_INTERVAL
         # When streaming stops, it's restored to NORMAL_CAPTURE_INTERVAL
-
-    def reload(self):
-        """
-        Reload configuration (stub for future API implementation).
         
-        Future implementation (Phase 7):
-        1. Call central server API: GET /api/v1/cameras/{camera_id}/config
-        2. Update instance variables with new values
-        3. Re-run validation
-        4. Return success/failure status
+        # ====================================================================
+        # APPLY LOCAL OVERRIDES
+        # ====================================================================
+        # Camera identity and optional settings from config_local.py
         
-        Current implementation:
-        No-op in Phase 1B - configuration is static from local variables
+        self._load_local_overrides()
+    
+    def _load_local_overrides(self):
         """
-        pass
+        Load and apply settings from config_local.py.
+        
+        CRITICAL: This method REQUIRES config_local.py to exist with camera identity.
+        System will exit if the file is missing or incomplete.
+        
+        Required in config_local.py:
+        - CAMERA_ID
+        - CAMERA_NAME
+        - CAMERA_LOCATION
+        
+        Optional in config_local.py:
+        - CENTRAL_SERVER_HOST
+        - CENTRAL_SERVER_PORT
+        - Any other config parameter
+        """
+        # Attempt to load config_local module (try normal import first, then fallback to file path)
+        config_local = None
+        try:
+            import importlib
+            # Try normal import (may be resolvable when module is installed or in PYTHONPATH)
+            config_local = importlib.import_module("config_local")
+        except Exception:
+            # Fallback: try loading config_local.py from the same directory as this file
+            config_path = Path(__file__).resolve().parent / "config_local.py"
+            if config_path.exists():
+                import importlib.util
+                spec = importlib.util.spec_from_file_location("config_local", str(config_path))
+                if spec is None or spec.loader is None:
+                    print("\n" + "="*70)
+                    print("❌ CRITICAL ERROR: Unable to load config_local.py (spec or loader missing)")
+                    print("="*70)
+                    print()
+                    print("Ensure config_local.py is a valid Python file and is readable.")
+                    print("If the file exists but cannot be loaded, check file permissions and syntax.")
+                    print()
+                    sys.exit(1)
+                config_local = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(config_local)
+            else:
+                print("\n" + "="*70)
+                print("❌ CRITICAL ERROR: config_local.py NOT FOUND")
+                print("="*70)
+                print()
+                print("Each camera MUST have a config_local.py file to prevent ID conflicts.")
+                print()
+                print("Create config_local.py in the same directory as config.py with:")
+                print()
+                print('  CAMERA_ID = "camera_X"           # Unique: camera_1, camera_2, etc.')
+                print('  CAMERA_NAME = "Descriptive Name"  # e.g., "Front Walkway"')
+                print('  CAMERA_LOCATION = "Location"      # e.g., "Front Entrance"')
+                print()
+                print("Example:")
+                print("  echo 'CAMERA_ID = \"camera_2\"' > config_local.py")
+                print("  echo 'CAMERA_NAME = \"Back Yard\"' >> config_local.py")
+                print("  echo 'CAMERA_LOCATION = \"Rear Entrance\"' >> config_local.py")
+                print()
+                print("See SETUP.md for detailed instructions.")
+                print("="*70)
+                print()
+                sys.exit(1)
+        
+        # Validate required camera identity fields
+        missing_fields = []
+        if not hasattr(config_local, 'CAMERA_ID') or not config_local.CAMERA_ID:
+            missing_fields.append('CAMERA_ID')
+        if not hasattr(config_local, 'CAMERA_NAME') or not config_local.CAMERA_NAME:
+            missing_fields.append('CAMERA_NAME')
+        if not hasattr(config_local, 'CAMERA_LOCATION') or not config_local.CAMERA_LOCATION:
+            missing_fields.append('CAMERA_LOCATION')
+        
+        if missing_fields:
+            print("\n" + "="*70)
+            print("❌ CRITICAL ERROR: config_local.py INCOMPLETE")
+            print("="*70)
+            print()
+            print(f"Missing required fields: {', '.join(missing_fields)}")
+            print()
+            print("config_local.py MUST define:")
+            print('  CAMERA_ID = "camera_X"           # Unique identifier')
+            print('  CAMERA_NAME = "Descriptive Name"  # Human-readable name')
+            print('  CAMERA_LOCATION = "Location"      # Physical location')
+            print()
+            print("See SETUP.md for detailed instructions.")
+            print("="*70)
+            print()
+            sys.exit(1)
+        
+        # Apply camera identity (required)
+        self.CAMERA_ID = config_local.CAMERA_ID
+        self.CAMERA_NAME = config_local.CAMERA_NAME
+        self.CAMERA_LOCATION = config_local.CAMERA_LOCATION
+        
+        # Apply optional overrides
+        if hasattr(config_local, 'CENTRAL_SERVER_HOST'):
+            self.CENTRAL_SERVER_HOST = config_local.CENTRAL_SERVER_HOST
+            # Rebuild API base URL
+            self.CENTRAL_SERVER_API_BASE = f"http://{self.CENTRAL_SERVER_HOST}:{self.CENTRAL_SERVER_PORT}/api/v1"
+        
+        if hasattr(config_local, 'CENTRAL_SERVER_PORT'):
+            self.CENTRAL_SERVER_PORT = config_local.CENTRAL_SERVER_PORT
+            # Rebuild API base URL
+            self.CENTRAL_SERVER_API_BASE = f"http://{self.CENTRAL_SERVER_HOST}:{self.CENTRAL_SERVER_PORT}/api/v1"
+        
+        print(f"✓ Loaded camera identity from config_local.py")
+        print(f"  Camera ID:   {self.CAMERA_ID}")
+        print(f"  Camera Name: {self.CAMERA_NAME}")
+        print(f"  Location:    {self.CAMERA_LOCATION}")
 
 
 # ============================================================================
-# MODULE-LEVEL INSTANCE
+# GLOBAL CONFIG INSTANCE
 # ============================================================================
-# Create singleton-like instance for easy import and backward compatibility
 
+# Create global config instance (singleton pattern)
+# This will be imported by other modules: from config import config
 config = Config()
 
 
@@ -299,47 +416,46 @@ config = Config()
 
 def ensure_directories():
     """
-    Create all required local directories if they don't exist.
+    Create required local directories if they don't exist.
     
-    Note: NFS directories (pictures, videos, thumbs) are NOT created here.
-    Those exist on the NFS mount and are managed by the central server.
-    This only creates local working directories on the camera.
-    
-    Should be called during system initialization.
+    NOTE: Does NOT create NFS directories - those are managed by central server.
+    Only creates local temporary/staging directories.
     """
-    directories = [
-        config.TMP_PATH,      # Temporary files and processing
-        config.PENDING_DIR,   # Local staging for files before transfer
+    # Local directories to create
+    local_dirs = [
+        config.TMP_PATH,
+        config.PENDING_DIR,
     ]
     
-    for directory in directories:
-        os.makedirs(directory, exist_ok=True)
-        print(f"Directory verified: {directory}")
+    for directory in local_dirs:
+        Path(directory).mkdir(parents=True, exist_ok=True)
+    
+    print(f"✓ Local directories verified")
 
 
 # ============================================================================
-# CONFIGURATION VALIDATION
+# VALIDATION
 # ============================================================================
 
 def validate_config():
     """
-    Validate configuration parameters for common issues.
-    Raises ValueError if configuration is invalid.
-    Prints warnings for non-critical issues.
+    Validate configuration settings.
+    
+    Raises:
+        ValueError: If configuration is invalid
     """
     
     # ========================================================================
     # CAMERA IDENTITY VALIDATION
     # ========================================================================
+    # These checks should never fail now because _load_local_overrides()
+    # ensures they exist, but we keep them for defense in depth
     
     if not config.CAMERA_ID:
-        raise ValueError("CAMERA_ID must be set (e.g., 'camera_1')")
-    
-    if not config.CAMERA_ID.startswith("camera_"):
-        print(f"Warning: CAMERA_ID '{config.CAMERA_ID}' doesn't follow 'camera_N' convention")
+        raise ValueError("CAMERA_ID must be set in config_local.py")
     
     if not config.CAMERA_NAME:
-        print(f"Warning: CAMERA_NAME is empty")
+        raise ValueError("CAMERA_NAME must be set in config_local.py")
     
     if not config.CAMERA_LOCATION:
         print(f"Warning: CAMERA_LOCATION is empty")

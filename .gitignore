@@ -211,3 +211,6 @@ security_footage/
 tmp/pending/
 
 run.log
+
+# Camera-specific configuration (CRITICAL - never commit!)
+config_local.py
