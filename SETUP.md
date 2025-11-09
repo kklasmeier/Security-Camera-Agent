@@ -204,7 +204,7 @@ sudo mkdir -p /home/pi/Security-Camera-Agent/security_footage
 **Important:** Replace `camera_2` with your camera's ID from `config_local.py`
 
 ```bash
-sudo mount -t nfs 192.168.1.26:/mnt/sdcard/security_camera/security_footage/camera_2 \
+sudo mount -t nfs 192.168.1.26:/mnt/sdcard/security_camera/security_footage/camera_3 \
   /home/pi/Security-Camera-Agent/security_footage
 ```
 
@@ -223,7 +223,7 @@ You should see subdirectories: `pictures/`, `videos/`, `thumbs/`
 
 ```bash
 sudo tee -a /etc/fstab > /dev/null << 'EOF'
-192.168.1.26:/mnt/sdcard/security_camera/security_footage/camera_2 /home/pi/Security-Camera-Agent/security_footage nfs defaults,_netdev,nofail,soft,timeo=30,retrans=3 0 0
+192.168.1.26:/mnt/sdcard/security_camera/security_footage/camera_3 /home/pi/Security-Camera-Agent/security_footage nfs defaults,_netdev,nofail,soft,timeo=30,retrans=3 0 0
 EOF
 ```
 
