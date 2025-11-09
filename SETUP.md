@@ -58,6 +58,8 @@ These instructions apply to:
 
 ```bash
 cd /home/pi
+sudo apt install git -y
+git --version
 git clone https://github.com/kklasmeier/Security-Camera-Agent.git
 cd Security-Camera-Agent
 ```
@@ -111,9 +113,9 @@ DO NOT commit this file to git - it contains camera-specific settings
 """
 
 # REQUIRED: Camera Identity (customize for each camera)
-CAMERA_ID = "camera_2"              # Unique: camera_1, camera_2, camera_3, camera_4
-CAMERA_NAME = "Back Yard"           # Descriptive name
-CAMERA_LOCATION = "Rear Entrance"   # Physical location
+CAMERA_ID = "camera_3"              # Unique: camera_1, camera_2, camera_3, camera_4
+CAMERA_NAME = "Back & Side Yard"           # Descriptive name
+CAMERA_LOCATION = "Master Bedroom, Side"   # Physical location
 
 # OPTIONAL: Override central server if different from default (192.168.1.26:8000)
 # CENTRAL_SERVER_HOST = "192.168.1.100"
