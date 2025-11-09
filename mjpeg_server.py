@@ -90,7 +90,12 @@ class MJPEGHandler(BaseHTTPRequestHandler):
                 
                 # Convert frame to JPEG
                 try:
-                    img = Image.fromarray(frame)
+                    # Convert BGR to RGB if needed (OpenCV uses BGR by default)
+                    # If your frames are already RGB, you can remove this line
+                    import cv2
+                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    
+                    img = Image.fromarray(frame_rgb)
                     buffer = BytesIO()
                     img.save(buffer, format='JPEG', quality=config.LIVESTREAM_JPEG_QUALITY)
                     jpeg_bytes = buffer.getvalue()

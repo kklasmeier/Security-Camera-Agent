@@ -113,9 +113,9 @@ DO NOT commit this file to git - it contains camera-specific settings
 """
 
 # REQUIRED: Camera Identity (customize for each camera)
-CAMERA_ID = "camera_3"              # Unique: camera_1, camera_2, camera_3, camera_4
-CAMERA_NAME = "Back & Side Yard"           # Descriptive name
-CAMERA_LOCATION = "Master Bedroom, Side"   # Physical location
+CAMERA_ID = "camera_4"              # Unique: camera_1, camera_2, camera_3, camera_4
+CAMERA_NAME = "Outside"           # Descriptive name
+CAMERA_LOCATION = "Back Patio Outside"   # Physical location
 
 # OPTIONAL: Override central server if different from default (192.168.1.26:8000)
 # CENTRAL_SERVER_HOST = "192.168.1.100"
@@ -204,7 +204,7 @@ sudo mkdir -p /home/pi/Security-Camera-Agent/security_footage
 **Important:** Replace `camera_2` with your camera's ID from `config_local.py`
 
 ```bash
-sudo mount -t nfs 192.168.1.26:/mnt/sdcard/security_camera/security_footage/camera_3 \
+sudo mount -t nfs 192.168.1.26:/mnt/sdcard/security_camera/security_footage/camera_4 \
   /home/pi/Security-Camera-Agent/security_footage
 ```
 
@@ -223,7 +223,7 @@ You should see subdirectories: `pictures/`, `videos/`, `thumbs/`
 
 ```bash
 sudo tee -a /etc/fstab > /dev/null << 'EOF'
-192.168.1.26:/mnt/sdcard/security_camera/security_footage/camera_3 /home/pi/Security-Camera-Agent/security_footage nfs defaults,_netdev,nofail,soft,timeo=30,retrans=3 0 0
+192.168.1.26:/mnt/sdcard/security_camera/security_footage/camera_4 /home/pi/Security-Camera-Agent/security_footage nfs defaults,_netdev,nofail,soft,timeo=30,retrans=3 0 0
 EOF
 ```
 
