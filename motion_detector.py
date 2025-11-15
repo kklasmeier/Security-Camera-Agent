@@ -66,8 +66,104 @@ class MotionDetector:
         # Debug mode (optional)
         self.debug_mode = False
         
+        # Score distribution tracking
+        self._init_score_tracking()
+        
         log(f"MotionDetector initialized: threshold={self.threshold}, "
             f"sensitivity={self.sensitivity}, cooldown={self.cooldown_seconds}s")
+    
+    def _init_score_tracking(self):
+        """
+        Initialize score distribution tracking.
+        
+        Creates dynamic buckets based on sensitivity setting.
+        Each camera can have different buckets based on its sensitivity.
+        """
+        self.score_buckets = {}
+        self.score_sum = 0
+        self.score_count = 0
+        self.max_score = 0
+        
+        # Create buckets dynamically based on sensitivity
+        if self.sensitivity <= 5:
+            # Very sensitive cameras: just 0 and 1+
+            self.bucket_ranges = [
+                ('0', 0, 0),
+                (f'1+', 1, float('inf'))
+            ]
+        elif self.sensitivity <= 20:
+            # Medium sensitivity: more granular
+            self.bucket_ranges = [
+                ('0', 0, 0),
+                ('1-5', 1, 5),
+                ('6-10', 6, 10),
+                (f'11-{self.sensitivity-1}', 11, self.sensitivity-1),
+                (f'{self.sensitivity}+', self.sensitivity, float('inf'))
+            ]
+        else:
+            # Higher sensitivity: create quartile buckets
+            quarter = self.sensitivity // 4
+            self.bucket_ranges = [
+                ('0', 0, 0),
+                (f'1-{quarter}', 1, quarter),
+                (f'{quarter+1}-{quarter*2}', quarter+1, quarter*2),
+                (f'{quarter*2+1}-{quarter*3}', quarter*2+1, quarter*3),
+                (f'{quarter*3+1}-{self.sensitivity-1}', quarter*3+1, self.sensitivity-1),
+                (f'{self.sensitivity}+', self.sensitivity, float('inf'))
+            ]
+        
+        # Initialize bucket counters
+        for bucket_name, _, _ in self.bucket_ranges:
+            self.score_buckets[bucket_name] = 0
+    
+    def _update_score_stats(self, score):
+        """
+        Update score distribution statistics.
+        
+        Args:
+            score (int): Motion score from this check
+        """
+        # Update running statistics
+        self.score_sum += score
+        self.score_count += 1
+        self.max_score = max(self.max_score, score)
+        
+        # Update bucket counts
+        for bucket_name, min_val, max_val in self.bucket_ranges:
+            if min_val <= score <= max_val:
+                self.score_buckets[bucket_name] += 1
+                break
+    
+    def _get_score_distribution(self):
+        """
+        Get formatted score distribution string.
+        
+        Returns:
+            str: Distribution summary like "0:95, 1-5:3, 6-10:2 | max:8, avg:0.3"
+        """
+        # Build bucket counts
+        bucket_parts = []
+        for bucket_name, _, _ in self.bucket_ranges:
+            count = self.score_buckets[bucket_name]
+            bucket_parts.append(f"{bucket_name}:{count}")
+        
+        distribution = ", ".join(bucket_parts)
+        
+        # Calculate average
+        avg_score = self.score_sum / self.score_count if self.score_count > 0 else 0
+        
+        # Format final string
+        stats = f"{distribution} | max:{self.max_score}, avg:{avg_score:.1f}"
+        
+        return stats
+    
+    def _reset_score_stats(self):
+        """Reset score statistics for next logging interval."""
+        for bucket_name in self.score_buckets:
+            self.score_buckets[bucket_name] = 0
+        self.score_sum = 0
+        self.score_count = 0
+        self.max_score = 0
     
     def start(self):
         """
@@ -145,13 +241,18 @@ class MotionDetector:
                     previous_frame,
                     current_frame
                 )
+                
+                # Track score for distribution statistics
+                self._update_score_stats(changed_pixels)
 
-                # Periodic logging of motion checks
+                # Periodic logging of motion checks with distribution
                 if config.MOTION_LOG_INTERVAL > 0 and check_count % config.MOTION_LOG_INTERVAL == 0:
-                    elapsed = current_time - last_log_time if last_log_time > 0 else 0
-                    log(f"Motion check #{check_count}: score={changed_pixels}/{self.sensitivity} "
-                        f"(active monitoring)")
+                    distribution = self._get_score_distribution()
+                    log(f"Motion check #{check_count} | {distribution}")
                     last_log_time = current_time
+                    
+                    # Reset stats for next interval
+                    self._reset_score_stats()
 
                 # Motion detected
                 if motion_detected:

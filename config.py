@@ -402,10 +402,41 @@ class Config:
             # Rebuild API base URL
             self.CENTRAL_SERVER_API_BASE = f"http://{self.CENTRAL_SERVER_HOST}:{self.CENTRAL_SERVER_PORT}/api/v1"
         
+        # ====================================================================
+        # GENERIC CONFIG OVERRIDES
+        # ====================================================================
+        # Apply any other config overrides from config_local.py
+        # This allows each camera to have custom tuning without modifying config.py
+        # 
+        # Examples in config_local.py:
+        #   MOTION_SENSITIVITY = 1         # Lower for more sensitive detection
+        #   MOTION_THRESHOLD = 40          # Lower for low-light conditions
+        #   MOTION_COOLDOWN_SECONDS = 30   # Longer for high-traffic areas
+        #   VIDEO_BITRATE = 2000000        # Higher for better quality
+        # ====================================================================
+        
+        overrides_applied = []
+        for attr in dir(config_local):
+            # Only process uppercase attributes (config constants)
+            if not attr.startswith('_') and attr.isupper():
+                # Skip the ones we already handled explicitly
+                if attr not in ['CAMERA_ID', 'CAMERA_NAME', 'CAMERA_LOCATION', 
+                               'CENTRAL_SERVER_HOST', 'CENTRAL_SERVER_PORT']:
+                    # Apply the override
+                    override_value = getattr(config_local, attr)
+                    setattr(self, attr, override_value)
+                    overrides_applied.append(f"{attr}={override_value}")
+        
         print(f"✓ Loaded camera identity from config_local.py")
         print(f"  Camera ID:   {self.CAMERA_ID}")
         print(f"  Camera Name: {self.CAMERA_NAME}")
         print(f"  Location:    {self.CAMERA_LOCATION}")
+        
+        # Report any additional overrides
+        if overrides_applied:
+            print(f"✓ Applied {len(overrides_applied)} config override(s):")
+            for override in overrides_applied:
+                print(f"  {override}")
 
 
 # ============================================================================

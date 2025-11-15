@@ -168,7 +168,37 @@ class CameraControlAPI:
                 'uptime_seconds': uptime,
                 'timestamp': datetime.utcnow().isoformat() + 'Z'
             })
-        
+
+        @self.app.route('/api/debug/motion', methods=['GET'])
+        def debug_motion():
+            """Debug: Get current motion score"""
+            import cv2
+            import numpy as np
+            
+            prev, curr = self.circular_buffer.get_frames_for_detection()
+            
+            if prev is None or curr is None:
+                return jsonify({'error': 'Frames not available'}), 503
+            
+            # Calculate motion score (same algorithm as motion_detector.py)
+            if prev.ndim == 3:
+                g1 = prev[:, :, 1]
+                g2 = curr[:, :, 1]
+            else:
+                g1 = prev
+                g2 = curr
+            
+            diff = cv2.absdiff(g1, g2)
+            changed_pixels = int(np.count_nonzero(diff > config.MOTION_THRESHOLD))
+            
+            return jsonify({
+                'score': changed_pixels,
+                'threshold': config.MOTION_SENSITIVITY,
+                'will_trigger': changed_pixels > config.MOTION_SENSITIVITY,
+                'frame_shape': list(prev.shape),
+                'detection_threshold': config.MOTION_THRESHOLD
+            })
+
         @self.app.route('/api/health', methods=['GET'])
         def health():
             """Camera health and status check."""
@@ -483,7 +513,6 @@ class CameraControlAPI:
                 log(f"Error stopping streaming during API shutdown: {e}", level="ERROR")
         
         log("Camera Control API stopped")
-
 
 # ============================================================================
 # STANDALONE TESTING
