@@ -86,22 +86,41 @@ class MotionDetector:
         
         # Create buckets dynamically based on sensitivity
         if self.sensitivity <= 5:
-            # Very sensitive cameras: just 0 and 1+
+            # Very low sensitivity: just 0 and trigger
             self.bucket_ranges = [
                 ('0', 0, 0),
-                (f'1+', 1, float('inf'))
+                (f'{self.sensitivity}+', self.sensitivity, float('inf'))
             ]
-        elif self.sensitivity <= 20:
-            # Medium sensitivity: more granular
+            
+        elif self.sensitivity <= 10:
+            # Low-medium: small increments
+            self.bucket_ranges = [
+                ('0', 0, 0),
+                ('1-5', 1, 5)
+            ]
+            # Only add 6-N bucket if sensitivity > 6
+            if self.sensitivity > 6:
+                self.bucket_ranges.append((f'6-{self.sensitivity-1}', 6, self.sensitivity-1))
+            self.bucket_ranges.append((f'{self.sensitivity}+', self.sensitivity, float('inf')))
+            
+        elif self.sensitivity <= 25:
+            # Medium: 5-point increments
             self.bucket_ranges = [
                 ('0', 0, 0),
                 ('1-5', 1, 5),
-                ('6-10', 6, 10),
-                (f'11-{self.sensitivity-1}', 11, self.sensitivity-1),
-                (f'{self.sensitivity}+', self.sensitivity, float('inf'))
+                ('6-10', 6, 10)
             ]
+            # Add 5-point increments up to sensitivity
+            current = 11
+            while current < self.sensitivity:
+                end = min(current + 4, self.sensitivity - 1)
+                if current <= end:
+                    self.bucket_ranges.append((f'{current}-{end}', current, end))
+                current += 5
+            self.bucket_ranges.append((f'{self.sensitivity}+', self.sensitivity, float('inf')))
+            
         else:
-            # Higher sensitivity: create quartile buckets
+            # Higher sensitivity: quartile buckets
             quarter = self.sensitivity // 4
             self.bucket_ranges = [
                 ('0', 0, 0),

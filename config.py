@@ -284,7 +284,7 @@ class Config:
         self.STREAM_MAX_DURATION_SECONDS = 1800 # Maximum stream duration (30 minutes)
 
         # System version (semantic versioning)
-        self.SYSTEM_VERSION = "1.0.0"
+        self.SYSTEM_VERSION = "1.0.2"
 
         # Note: PICTURE_CAPTURE_INTERVAL remains at 0.5s as default
         # When streaming starts, it's changed to STREAMING_CAPTURE_INTERVAL
