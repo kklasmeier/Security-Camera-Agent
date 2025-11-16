@@ -92,6 +92,19 @@ class EventProcessor:
         )
         self.processor_thread.start()
         log("Event processor started")
+
+    def get_health(self):
+        """
+        Get health status for watchdog monitoring.
+        
+        Returns:
+            dict: Health status including thread state and processing status
+        """
+        return {
+            'thread_alive': self.processor_thread.is_alive() if self.processor_thread else False,
+            'is_processing': self.is_processing(),
+            'running': self.running
+        }
     
     def stop(self):
         """

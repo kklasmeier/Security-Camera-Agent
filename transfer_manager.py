@@ -117,6 +117,15 @@ class TransferManager:
         )
         self.thread.start()
         log("TransferManager started", level="INFO")
+
+    def get_health(self):
+        """Get health status for watchdog monitoring."""
+        return {
+            'thread_alive': self.thread.is_alive() if self.thread else False,
+            'files_transferred': self.files_transferred,
+            'bytes_transferred': self.total_bytes_transferred,
+            'running': self.running
+        }
     
     def stop(self):
         """Stop transfer manager thread."""

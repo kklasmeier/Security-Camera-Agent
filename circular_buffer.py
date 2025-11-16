@@ -129,6 +129,8 @@ class CircularBuffer:
         # Control flags
         self.running = False
         self.capture_thread = None
+        self.frame_count = 0
+        self.last_frame_time = 0
         
         log(f"CircularBuffer initialized: {self.resolution[0]}x{self.resolution[1]} "
             f"@ {self.framerate}fps, capacity-driven buffer")
@@ -484,7 +486,8 @@ class CircularBuffer:
                 frame = self.picam2.capture_array()
                 self.last_frame_time = time.time()
                 frame_count += 1
-                
+                self.frame_count += 1
+
                 # Debug log every 50 frames with timing info
                 if frame_count % 50 == 0:
                     elapsed = time.time() - capture_start_time
@@ -954,6 +957,16 @@ class CircularBuffer:
         
         log(f"Normal mode restored: {self.capture_interval}s capture interval, "
             f"motion detection resumed")
+
+    def get_health(self):
+        """Get health status for watchdog monitoring."""
+        return {
+            'thread_alive': self.capture_thread.is_alive() if self.capture_thread else False,
+            'last_frame_time': self.last_frame_time,
+            'frame_count': self.frame_count,
+            'running': self.running,
+            'camera_initialized': self.picam2 is not None
+        }
 
     def stop(self):
         """

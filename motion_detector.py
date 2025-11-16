@@ -62,7 +62,8 @@ class MotionDetector:
         self.detection_thread = None
         self._paused = False  # Initialize pause state
         self._pause_lock = threading.Lock()  # Thread-safe pause control
-        
+        self.check_count = 0
+
         # Debug mode (optional)
         self.debug_mode = False
         
@@ -84,12 +85,16 @@ class MotionDetector:
         self.score_count = 0
         self.max_score = 0
         
+        # Use a large integer to represent an open-ended upper bound so
+        # bucket tuples consistently use integers (avoids float type).
+        inf_bound = 10**9
+        
         # Create buckets dynamically based on sensitivity
         if self.sensitivity <= 5:
             # Very low sensitivity: just 0 and trigger
             self.bucket_ranges = [
                 ('0', 0, 0),
-                (f'{self.sensitivity}+', self.sensitivity, float('inf'))
+                (f'{self.sensitivity}+', self.sensitivity, inf_bound)
             ]
             
         elif self.sensitivity <= 10:
@@ -101,7 +106,7 @@ class MotionDetector:
             # Only add 6-N bucket if sensitivity > 6
             if self.sensitivity > 6:
                 self.bucket_ranges.append((f'6-{self.sensitivity-1}', 6, self.sensitivity-1))
-            self.bucket_ranges.append((f'{self.sensitivity}+', self.sensitivity, float('inf')))
+            self.bucket_ranges.append((f'{self.sensitivity}+', self.sensitivity, inf_bound))
             
         elif self.sensitivity <= 25:
             # Medium: 5-point increments
@@ -117,7 +122,7 @@ class MotionDetector:
                 if current <= end:
                     self.bucket_ranges.append((f'{current}-{end}', current, end))
                 current += 5
-            self.bucket_ranges.append((f'{self.sensitivity}+', self.sensitivity, float('inf')))
+            self.bucket_ranges.append((f'{self.sensitivity}+', self.sensitivity, inf_bound))
             
         else:
             # Higher sensitivity: quartile buckets
@@ -128,7 +133,7 @@ class MotionDetector:
                 (f'{quarter+1}-{quarter*2}', quarter+1, quarter*2),
                 (f'{quarter*2+1}-{quarter*3}', quarter*2+1, quarter*3),
                 (f'{quarter*3+1}-{self.sensitivity-1}', quarter*3+1, self.sensitivity-1),
-                (f'{self.sensitivity}+', self.sensitivity, float('inf'))
+                (f'{self.sensitivity}+', self.sensitivity, inf_bound)
             ]
         
         # Initialize bucket counters
@@ -196,7 +201,18 @@ class MotionDetector:
         )
         self.detection_thread.start()
         log("Motion detection started")
-    
+
+    def get_health(self):
+        """Get health status for watchdog monitoring."""
+        return {
+            'thread_alive': self.detection_thread.is_alive() if self.detection_thread else False,
+            'check_count': self.check_count,
+            'last_detection_time': self.last_detection_time,
+            'in_cooldown': self._in_cooldown(),
+            'paused': self._paused,
+            'running': self.running
+        }
+
     def stop(self):
         """
         Stop motion detection loop.
@@ -216,12 +232,11 @@ class MotionDetector:
 
         log("Motion detection loop started")
 
-        check_count = 0
         last_log_time = time.time()
 
         while self.running:
             try:
-                check_count += 1
+                self.check_count += 1
                 current_time = time.time()
 
                 # === WATCHDOG PAUSE GUARD ===
@@ -238,7 +253,7 @@ class MotionDetector:
 
                     # Log cooldown status every 5 seconds
                     if current_time - last_log_time >= 5.0:
-                        log(f"Cooldown: {remaining:.1f}s remaining (check #{check_count})")
+                        log(f"Cooldown: {remaining:.1f}s remaining (check #{self.check_count})")
                         last_log_time = current_time
 
                     time.sleep(0.5)
@@ -250,7 +265,7 @@ class MotionDetector:
                 if previous_frame is None or current_frame is None:
                     # Frames not yet available
                     if current_time - last_log_time >= 5.0:
-                        log(f"Waiting for frames... (check #{check_count})")
+                        log(f"Waiting for frames... (check #{self.check_count})")
                         last_log_time = current_time
                     time.sleep(0.5)
                     continue
@@ -265,9 +280,9 @@ class MotionDetector:
                 self._update_score_stats(changed_pixels)
 
                 # Periodic logging of motion checks with distribution
-                if config.MOTION_LOG_INTERVAL > 0 and check_count % config.MOTION_LOG_INTERVAL == 0:
+                if config.MOTION_LOG_INTERVAL > 0 and self.check_count % config.MOTION_LOG_INTERVAL == 0:
                     distribution = self._get_score_distribution()
-                    log(f"Motion check #{check_count} | {distribution}")
+                    log(f"Motion check #{self.check_count} | {distribution}")
                     last_log_time = current_time
                     
                     # Reset stats for next interval
@@ -275,7 +290,7 @@ class MotionDetector:
 
                 # Motion detected
                 if motion_detected:
-                    log(f"MOTION DETECTED! Check #{check_count}, Score: {changed_pixels}/{self.sensitivity}")
+                    log(f"MOTION DETECTED! Check #{self.check_count}, Score: {changed_pixels}/{self.sensitivity}")
 
                     if config.MOTION_LOG_DETAILS:
                         log(f"  Frames compared: {previous_frame.shape}")
@@ -285,7 +300,7 @@ class MotionDetector:
                     self._handle_motion_event(current_frame, changed_pixels)
                     last_log_time = current_time
 
-                if check_count % 50 == 0:      # every ~50 frames or checks
+                if self.check_count % 50 == 0:      # every ~50 frames or checks
                     gc.collect()
                     cv2.setUseOptimized(False)
                     cv2.setUseOptimized(True)

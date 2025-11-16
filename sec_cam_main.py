@@ -31,6 +31,7 @@ from api_client import APIClient
 from logger import log, stop_logger
 from circular_buffer import CircularBuffer
 from motion_event import MotionEvent
+from system_watchdog import SystemWatchdog
 
 # DEPRECATED: database.py removed in Session 1B-3
 # Components now use APIClient for central server communication
@@ -79,7 +80,8 @@ class SecurityCameraSystem:
 
         # System state
         self.running = False
-        
+        self.watchdog = None
+
         log("System initializing...")
     
     def initialize(self):
@@ -208,6 +210,17 @@ class SecurityCameraSystem:
                 event_processor=self.event_processor  # NEW: Add event_processor reference
             )
 
+            log("Initializing system watchdog...")
+            self.watchdog = SystemWatchdog(
+                circular_buffer=self.circular_buffer,
+                motion_detector=self.motion_detector,
+                event_processor=self.event_processor,
+                transfer_manager=self.transfer_manager,
+                api_client=self.api_client
+            )
+            log("✓ System watchdog initialized", level="INFO")
+
+
             log("Core initialization complete")
             return True
             
@@ -290,6 +303,7 @@ class SecurityCameraSystem:
                 return False
             self.api_server.start()
             
+            self.watchdog.start()
             # COMMENTED OUT - Watchdog references self.db which no longer exists
             # self.start_camera_watchdog()
             
@@ -393,6 +407,9 @@ class SecurityCameraSystem:
                 except Exception as e:
                     log(f"Error closing API client: {e}", level="WARNING")
             
+            if self.watchdog:
+                self.watchdog.stop()
+
             # Flush logs
             log("System shutdown complete")
             stop_logger()

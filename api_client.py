@@ -482,6 +482,27 @@ class APIClient:
         except Exception:
             return False
 
+    def get_camera_stats(self, hours: int = 24):
+        """Get camera statistics for specified time period."""
+        # Lazy import to avoid circular dependency
+        from logger import log
+
+        try:
+            response = self.session.get(
+                f"{self.base_url}/cameras/{self.camera_id}/stats",
+                params={'hours': hours},
+                timeout=(3, 10)
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            
+            log(f"Failed to get camera stats: {response.status_code}", level="WARNING")
+            return None
+        
+        except requests.exceptions.RequestException as e:
+            log(f"Error getting camera stats: {e}", level="WARNING")
+            return None
 
 # ============================================================================
 # STANDALONE TESTING

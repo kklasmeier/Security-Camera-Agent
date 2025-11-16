@@ -514,6 +514,19 @@ class CameraControlAPI:
         
         log("Camera Control API stopped")
 
+    def get_health(self):
+        """
+        Get health status for watchdog monitoring.
+        
+        Returns:
+            dict: Health status including thread state and processing status
+        """
+        return {
+            'thread_alive': self.server_thread.is_alive() if self.server_thread else False,
+            'is_processing': self.event_processor.is_processing() if self.event_processor else False,
+            'running': self.running
+        }
+    
 # ============================================================================
 # STANDALONE TESTING
 # ============================================================================
