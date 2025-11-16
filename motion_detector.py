@@ -385,10 +385,11 @@ class MotionDetector:
         
         NEW BEHAVIOR (Session 1B-4):
         1. Generate timestamp (ISO 8601 format for API)
-        2. Create event on central server via API
-        3. If successful: Signal Thread 3 with event_id
-        4. If failed: Log error, event is LOST
-        5. Enter cooldown period (regardless of success/failure)
+        2. Calculate confidence score (normalized by camera sensitivity)
+        3. Create event on central server via API
+        4. If successful: Signal Thread 3 with event_id
+        5. If failed: Log error, event is LOST
+        6. Enter cooldown period (regardless of success/failure)
         
         Args:
             current_frame: The frame that triggered motion (numpy array)
@@ -399,13 +400,20 @@ class MotionDetector:
             timestamp = datetime.now()
             timestamp_str = timestamp.isoformat()  # ISO 8601 format for API
             
-            log(f"Motion detected! Score: {motion_score}", level="INFO")
+            # Calculate confidence score (normalized by sensitivity threshold)
+            # confidence = ((actual - threshold) / threshold) * 100
+            # Example: sensitivity=50, motion_score=75 -> confidence=50%
+            confidence_score = ((motion_score - self.sensitivity) / self.sensitivity) * 100
+            confidence_score = round(confidence_score, 1)  # Round to 1 decimal place
+            
+            log(f"Motion detected! Score: {motion_score}, Confidence: {confidence_score}%", level="INFO")
             
             # Create event on central server
             log(f"Creating event on central server...", level="INFO")
             event_id = self.api_client.create_event(
                 timestamp=timestamp_str,
-                motion_score=motion_score
+                motion_score=motion_score,
+                confidence_score=confidence_score
             )
             
             if event_id is None:

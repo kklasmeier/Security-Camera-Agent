@@ -166,7 +166,7 @@ class APIClient:
                 log(f"Retrying registration in {delay} seconds...", level="INFO")
                 time.sleep(delay)
     
-    def create_event(self, timestamp: str, motion_score: float) -> Optional[int]:
+    def create_event(self, timestamp: str, motion_score: float, confidence_score: Optional[float] = None) -> Optional[int]:
         """
         Create new motion event on central server.
         
@@ -181,6 +181,7 @@ class APIClient:
         Args:
             timestamp: ISO 8601 timestamp string (e.g., "2025-10-30T14:30:22.186476")
             motion_score: Motion detection score (0-100)
+            confidence_score: Normalized confidence (0-100%), optional
         
         Returns:
             int: event_id from central server (never returns None, retries forever)
@@ -199,6 +200,9 @@ class APIClient:
                     "timestamp": timestamp,
                     "motion_score": motion_score
                 }
+                
+                if confidence_score is not None:
+                    payload["confidence_score"] = confidence_score
                 
                 if attempt == 1:
                     log(f"Creating event: motion_score={motion_score:.1f}", level="INFO")

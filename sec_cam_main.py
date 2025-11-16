@@ -303,9 +303,10 @@ class SecurityCameraSystem:
                 return False
             self.api_server.start()
             
-            self.watchdog.start()
-            # COMMENTED OUT - Watchdog references self.db which no longer exists
-            # self.start_camera_watchdog()
+            if self.watchdog:
+                self.watchdog.start()
+            else:
+                log("SystemWatchdog not initialized; skipping watchdog start", level="WARNING")
             
             # System is now running
             self.running = True
