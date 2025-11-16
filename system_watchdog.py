@@ -294,7 +294,19 @@ class SystemWatchdog:
         if cb_health['last_frame_time']:
             time_since_frame = time.time() - cb_health['last_frame_time']
             if time_since_frame > 60:  # No frames for 60s
-                issues.append(f"NoFrames:{time_since_frame:.0f}s")
+                # Format time in human-readable format
+                if time_since_frame < 3600:  # Less than 1 hour
+                    formatted_time = f"{int(time_since_frame/60)}m"
+                elif time_since_frame < 86400:  # Less than 1 day
+                    hours = int(time_since_frame/3600)
+                    minutes = int((time_since_frame % 3600)/60)
+                    formatted_time = f"{hours}h{minutes}m"
+                else:  # 1+ days
+                    days = int(time_since_frame/86400)
+                    hours = int((time_since_frame % 86400)/3600)
+                    formatted_time = f"{days}d{hours}h"
+                
+                issues.append(f"NoFrames:{formatted_time}")
         
         # Check motion detector
         current_checks = self.motion_detector.check_count
