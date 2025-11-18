@@ -14,6 +14,7 @@ Features:
 - Memory-efficient batching
 
 Updated for Phase 1B: Multi-camera architecture
+FIXED: Log rotation no longer stalls at midnight
 """
 
 import threading
@@ -108,32 +109,53 @@ class EnhancedLogger:
         
         Creates daily log files: runtime_YYYYMMDD.log
         Automatically rotates to new file when date changes.
+        
+        FIXED: Opens new file BEFORE closing old one to prevent stalls.
         """
         current_date = datetime.now().strftime("%Y%m%d")
         
         # Check if we need to rotate to new file
         if current_date != self.current_date:
-            # Close previous file if open
-            if self.current_log_file is not None:
-                try:
-                    self.current_log_file.close()
-                except:
-                    pass
+            # Store reference to old file
+            old_file = self.current_log_file
             
-            # Open new file for today
+            # Open new file for today FIRST (before closing old one)
             log_filename = f"runtime_{current_date}.log"
             log_path = self.log_dir / log_filename
             
-            # Open in append mode (survives restarts)
-            self.current_log_file = open(log_path, 'a', buffering=1)  # Line buffered
-            self.current_date = current_date
-            
-            # Log file rotation
-            if self.current_log_file:
-                rotation_msg = f"Log file opened: {log_filename}"
-                self._write_to_file("="*60, skip_timestamp=True)
-                self._write_to_file(rotation_msg)
-                self._write_to_file("="*60, skip_timestamp=True)
+            try:
+                # Open in append mode (survives restarts)
+                new_file = open(log_path, 'a', buffering=1)  # Line buffered
+                
+                # Atomic switch to new file
+                self.current_log_file = new_file
+                self.current_date = current_date
+                
+                # Now safely close old file (after switch is complete)
+                if old_file is not None:
+                    try:
+                        old_file.flush()
+                        old_file.close()
+                    except Exception as e:
+                        # Log to new file that old file close had issues
+                        print(f"[WARNING] Error closing old log file: {e}")
+                
+                # Log file rotation to new file
+                rotation_msg = f"Log file rotated to: {log_filename}"
+                print(f"[LOG ROTATION] {rotation_msg}")
+                # Write directly to avoid recursion
+                timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                new_file.write(f"{'='*60}\n")
+                new_file.write(f"[{timestamp_str}] {rotation_msg}\n")
+                new_file.write(f"{'='*60}\n")
+                new_file.flush()
+                
+            except Exception as e:
+                # If new file fails to open, keep using old file
+                print(f"[ERROR] Failed to rotate log file: {e}")
+                # Revert date so we try again next time
+                if old_file is not None:
+                    self.current_log_file = old_file
     
     def _write_to_file(self, message, skip_timestamp=False):
         """

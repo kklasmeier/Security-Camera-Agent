@@ -106,7 +106,7 @@ class Config:
         # Post-motion recording: wait this many seconds after motion detection
         # This allows the continuous buffer to capture post-event footage
         # With 2000-chunk buffer, we wait ~30s then dump the entire buffer
-        self.POST_MOTION_WAIT_SECONDS = 30
+        self.POST_MOTION_WAIT_SECONDS = 50
         
         # Abort timeout: maximum time to wait for event processing to abort (seconds)
         # When live streaming is requested during event processing, wait up to this long
@@ -133,7 +133,7 @@ class Config:
         #   1000 chunks ≈ 12 MB ≈ 20-30 seconds
         #   1500 chunks ≈ 18 MB ≈ 30-40 seconds
         #   2000 chunks ≈ 24 MB ≈ 40-60 seconds  (RECOMMENDED - single continuous dump)
-        self.CIRCULAR_BUFFER_MAX_CHUNKS = 2000
+        self.CIRCULAR_BUFFER_MAX_CHUNKS = 2500
         
         # Maximum memory for circular buffer (bytes)
         # Safety limit to prevent runaway memory usage
@@ -204,7 +204,7 @@ class Config:
         
         # Cooldown period between motion events (seconds)
         # Must be longer than Thread 3 processing time (~17s) to prevent overlaps
-        self.MOTION_COOLDOWN_SECONDS = 65
+        self.MOTION_COOLDOWN_SECONDS = 70
         
         # ====================================================================
         # WEB/STREAMING SETTINGS
@@ -284,7 +284,7 @@ class Config:
         self.STREAM_MAX_DURATION_SECONDS = 1800 # Maximum stream duration (30 minutes)
 
         # System version (semantic versioning)
-        self.SYSTEM_VERSION = "1.0.5"
+        self.SYSTEM_VERSION = "1.0.6"
 
         # Note: PICTURE_CAPTURE_INTERVAL remains at 0.5s as default
         # When streaming starts, it's changed to STREAMING_CAPTURE_INTERVAL
