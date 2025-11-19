@@ -90,10 +90,24 @@ class MJPEGHandler(BaseHTTPRequestHandler):
                 
                 # Convert frame to JPEG
                 try:
-                    # Convert BGR to RGB if needed (OpenCV uses BGR by default)
-                    # If your frames are already RGB, you can remove this line
-                    import cv2
-                    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # ===================================================================
+                    # AUTO-DETECT CAMERA TYPE AND APPLY APPROPRIATE COLOR CONVERSION
+                    # ===================================================================
+                    # Check if NoIR camera (different color handling)
+                    # NoIR cameras see infrared light and need different color processing
+                    buffer_obj = getattr(self.server, "circular_buffer", None)
+                    is_noir = getattr(buffer_obj, 'is_noir', False) if buffer_obj else False
+                    
+                    if is_noir:
+                        # NoIR camera: RGB888 format is already correct, no conversion needed
+                        # NoIR cameras have no IR filter so colors are naturally different
+                        frame_rgb = frame
+                    else:
+                        # Standard camera: Convert BGR to RGB
+                        # OpenCV uses BGR by default, need to convert to RGB for PIL
+                        import cv2
+                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # ===================================================================
                     
                     img = Image.fromarray(frame_rgb)
                     buffer = BytesIO()

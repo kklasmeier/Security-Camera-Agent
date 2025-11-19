@@ -164,6 +164,23 @@ class CircularBuffer:
             # Initialize Picamera2
             self.picam2 = Picamera2()
             
+            # ===================================================================
+            # DETECT CAMERA TYPE (NoIR vs Standard)
+            # ===================================================================
+            # NoIR cameras have no IR filter and handle colors differently
+            # Auto-detect camera model to apply appropriate color processing
+            camera_properties = self.picam2.camera_properties
+            camera_model = camera_properties.get('Model', 'unknown')
+            self.is_noir = 'noir' in camera_model.lower()
+            
+            log("="*60)
+            log(f"Camera Model: {camera_model}")
+            log(f"NoIR Camera: {self.is_noir}")
+            if self.is_noir:
+                log("NoIR camera detected - will apply appropriate color handling")
+            log("="*60)
+            # ===================================================================
+            
             # Configure for video
             video_config = self.picam2.create_video_configuration(
                 main={
