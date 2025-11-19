@@ -13,8 +13,7 @@ Features:
 - Configurable log levels per destination
 - Memory-efficient batching
 
-Updated for Phase 1B: Multi-camera architecture
-FIXED: Log rotation no longer stalls at midnight
+FIXED: Removed os.fsync() to prevent midnight deadlock
 """
 
 import threading
@@ -110,56 +109,69 @@ class EnhancedLogger:
         Creates daily log files: runtime_YYYYMMDD.log
         Automatically rotates to new file when date changes.
         
-        FIXED: Opens new file BEFORE closing old one to prevent stalls.
+        CRITICAL FIX: This method MUST NOT be called while holding file_lock
+        to prevent deadlock. Only call from _write_to_file which holds the lock.
         """
         current_date = datetime.now().strftime("%Y%m%d")
         
         # Check if we need to rotate to new file
         if current_date != self.current_date:
+            print(f"[LOG ROTATION] Starting rotation to {current_date}")
+            
             # Store reference to old file
             old_file = self.current_log_file
             
-            # Open new file for today FIRST (before closing old one)
+            # Build new log file path
             log_filename = f"runtime_{current_date}.log"
             log_path = self.log_dir / log_filename
             
             try:
-                # Open in append mode (survives restarts)
-                new_file = open(log_path, 'a', buffering=1)  # Line buffered
+                # Open new file FIRST (before closing old)
+                # Use line buffering (1) for automatic flushing per line
+                print(f"[LOG ROTATION] Opening new file: {log_path}")
+                new_file = open(log_path, 'a', buffering=1)
+                
+                # Write rotation marker to new file immediately
+                timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                new_file.write(f"{'='*60}\n")
+                new_file.write(f"[{timestamp_str}] Log file rotated to: {log_filename}\n")
+                new_file.write(f"{'='*60}\n")
+                new_file.flush()  # Flush only, no fsync
                 
                 # Atomic switch to new file
                 self.current_log_file = new_file
                 self.current_date = current_date
                 
-                # Now safely close old file (after switch is complete)
+                print(f"[LOG ROTATION] Switched to new file")
+                
+                # Close old file safely (after switch is complete)
                 if old_file is not None:
                     try:
                         old_file.flush()
                         old_file.close()
+                        print(f"[LOG ROTATION] Old file closed")
                     except Exception as e:
-                        # Log to new file that old file close had issues
                         print(f"[WARNING] Error closing old log file: {e}")
                 
-                # Log file rotation to new file
-                rotation_msg = f"Log file rotated to: {log_filename}"
-                print(f"[LOG ROTATION] {rotation_msg}")
-                # Write directly to avoid recursion
-                timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                new_file.write(f"{'='*60}\n")
-                new_file.write(f"[{timestamp_str}] {rotation_msg}\n")
-                new_file.write(f"{'='*60}\n")
-                new_file.flush()
+                print(f"[LOG ROTATION] Rotation complete!")
                 
             except Exception as e:
-                # If new file fails to open, keep using old file
-                print(f"[ERROR] Failed to rotate log file: {e}")
-                # Revert date so we try again next time
-                if old_file is not None:
+                error_msg = f"Failed to rotate log file: {e}"
+                print(f"[ERROR] {error_msg}")
+                import traceback
+                traceback.print_exc()
+                
+                # Revert to old file if still available
+                if old_file is not None and not old_file.closed:
                     self.current_log_file = old_file
+                    print(f"[LOG ROTATION] Reverted to old file")
     
     def _write_to_file(self, message, skip_timestamp=False):
         """
         Write message to log file (thread-safe).
+        
+        CRITICAL: Removed os.fsync() to prevent deadlock.
+        Uses line buffering instead for automatic flushing.
         
         Args:
             message (str): Message to write
@@ -168,18 +180,19 @@ class EnhancedLogger:
         with self.file_lock:
             try:
                 # Check if we need to rotate log file
+                # This is safe because we hold file_lock
                 self._open_log_file()
                 
-                if self.current_log_file:
+                if self.current_log_file and not self.current_log_file.closed:
                     if skip_timestamp:
                         self.current_log_file.write(f"{message}\n")
                     else:
                         timestamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         self.current_log_file.write(f"[{timestamp_str}] {message}\n")
                     
-                    # Flush to disk immediately (important for debugging)
+                    # Only flush, don't fsync (fsync can block indefinitely)
+                    # Line buffering ensures writes happen immediately anyway
                     self.current_log_file.flush()
-                    os.fsync(self.current_log_file.fileno())
                     
             except Exception as e:
                 # Fallback to console only if file write fails
@@ -303,6 +316,7 @@ class EnhancedLogger:
                     self._write_to_file("="*60, skip_timestamp=True)
                     self._write_to_file("Logger stopped - end of session")
                     self._write_to_file("="*60, skip_timestamp=True)
+                    self.current_log_file.flush()
                     self.current_log_file.close()
                     self.current_log_file = None
                 except:

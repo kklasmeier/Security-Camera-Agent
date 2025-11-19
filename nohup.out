@@ -1,0 +1,38 @@
+==================================================
+Midnight Log Rotation Monitor
+Started: Wed 19 Nov 11:01:07 EST 2025
+==================================================
+
+Monitoring every 30 seconds...
+Press Ctrl+C to stop
+
+[2025-11-19 11:01:07] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568067s
+[2025-11-19 11:01:07] ⚠ WARNING: Log file not updated in 1763568067 seconds!
+[2025-11-19 11:01:37] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568097s
+[2025-11-19 11:01:37] ⚠ WARNING: Log file not updated in 1763568097 seconds!
+[2025-11-19 11:02:07] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568128s
+[2025-11-19 11:02:07] ⚠ WARNING: Log file not updated in 1763568128 seconds!
+[2025-11-19 11:02:38] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568158s
+[2025-11-19 11:02:38] ⚠ WARNING: Log file not updated in 1763568158 seconds!
+[2025-11-19 11:03:08] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568188s
+[2025-11-19 11:03:08] ⚠ WARNING: Log file not updated in 1763568188 seconds!
+[2025-11-19 11:03:38] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568219s
+[2025-11-19 11:03:38] ⚠ WARNING: Log file not updated in 1763568219 seconds!
+[2025-11-19 11:04:09] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568249s
+[2025-11-19 11:04:09] ⚠ WARNING: Log file not updated in 1763568249 seconds!
+[2025-11-19 11:04:39] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568279s
+[2025-11-19 11:04:39] ⚠ WARNING: Log file not updated in 1763568279 seconds!
+[2025-11-19 11:05:09] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568310s
+[2025-11-19 11:05:09] ⚠ WARNING: Log file not updated in 1763568310 seconds!
+[2025-11-19 11:05:40] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568340s
+[2025-11-19 11:05:40] ⚠ WARNING: Log file not updated in 1763568340 seconds!
+[2025-11-19 11:06:10] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568370s
+[2025-11-19 11:06:10] ⚠ WARNING: Log file not updated in 1763568370 seconds!
+[2025-11-19 11:06:40] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568401s
+[2025-11-19 11:06:40] ⚠ WARNING: Log file not updated in 1763568401 seconds!
+[2025-11-19 11:07:11] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568431s
+[2025-11-19 11:07:11] ⚠ WARNING: Log file not updated in 1763568431 seconds!
+[2025-11-19 11:07:41] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568461s
+[2025-11-19 11:07:41] ⚠ WARNING: Log file not updated in 1763568461 seconds!
+[2025-11-19 11:08:11] ✓ Healthy - PID:397041 CPU:34.8% MEM:23.9% LogSize:0B LogAge:1763568491s
+[2025-11-19 11:08:11] ⚠ WARNING: Log file not updated in 1763568491 seconds!
