@@ -357,10 +357,10 @@ class SystemWatchdog:
     def _check_camera_detected(self):
         """
         Check if camera is detected by system.
-        Uses rpicam-hello since vcgencmd is broken on Trixie.
-        
+        Uses rpicam-hello --list-cameras on Trixie.
+
         Returns:
-            bool: True if camera detected
+            bool: True if at least one camera is listed
         """
         try:
             result = subprocess.run(
@@ -369,10 +369,23 @@ class SystemWatchdog:
                 text=True,
                 timeout=5
             )
-            
-            # Look for camera in output
-            return 'imx708' in result.stdout or 'imx219' in result.stdout
-            
+
+            if result.returncode != 0:
+                return False
+
+            out = result.stdout
+            # Require the header and at least one numbered camera line
+            if "Available cameras:" not in out:
+                return False
+
+            for line in out.splitlines():
+                line = line.strip()
+                # Lines like: "0 : ov5647 [mode: ...]"
+                if line and line[0].isdigit() and " :" in line:
+                    return True
+
+            return False
+
         except (subprocess.TimeoutExpired, FileNotFoundError):
             return False
     

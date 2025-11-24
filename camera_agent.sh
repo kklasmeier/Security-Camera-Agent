@@ -3,7 +3,6 @@
 # camera_agent.sh
 # Helper tool for managing the Security Camera Agent service
 #
-
 SERVICE="security-camera-agent"
 LOG_FILE="/var/log/syslog"   # journalctl will still be used for accuracy
 
@@ -12,6 +11,8 @@ show_help() {
 Usage: $0 <command>
 
 Commands:
+  start          Start the security camera agent
+  stop           Stop the security camera agent
   restart        Restart the security camera agent
   status         Show the status of the agent service
   logs           Show the last 1000 log lines for the agent
@@ -19,12 +20,37 @@ Commands:
   help           Show this help message
 
 Examples:
+  $0 start
+  $0 stop
   $0 restart
   $0 status
   $0 logs
   $0 follow
-
 EOF
+}
+
+start_service() {
+    echo "▶️  Starting $SERVICE..."
+    sudo systemctl start "$SERVICE"
+    if [[ $? -eq 0 ]]; then
+        echo "✅ Started successfully."
+        sleep 2
+        show_status
+    else
+        echo "❌ Failed to start."
+    fi
+}
+
+stop_service() {
+    echo "⏹️  Stopping $SERVICE..."
+    sudo systemctl stop "$SERVICE"
+    if [[ $? -eq 0 ]]; then
+        echo "✅ Stopped successfully."
+        sleep 1
+        show_status
+    else
+        echo "❌ Failed to stop."
+    fi
 }
 
 restart_service() {
@@ -32,6 +58,8 @@ restart_service() {
     sudo systemctl restart "$SERVICE"
     if [[ $? -eq 0 ]]; then
         echo "✅ Restarted successfully."
+        sleep 2
+        show_status
     else
         echo "❌ Failed to restart."
     fi
@@ -61,6 +89,12 @@ fi
 
 # Handle commands
 case "$1" in
+    start)
+        start_service
+        ;;
+    stop)
+        stop_service
+        ;;
     restart)
         restart_service
         ;;
