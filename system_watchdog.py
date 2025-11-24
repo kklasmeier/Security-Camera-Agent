@@ -356,11 +356,11 @@ class SystemWatchdog:
     
     def _check_camera_detected(self):
         """
-        Check if camera is detected by system.
-        Uses rpicam-hello --list-cameras on Trixie.
+        Check if camera is detected by system on Trixie.
 
-        Returns:
-            bool: True if at least one camera is listed
+        Uses: rpicam-hello --list-cameras
+        Returns True if any known sensor name appears in the output,
+        or if at least one numbered camera line is present.
         """
         try:
             result = subprocess.run(
@@ -370,24 +370,35 @@ class SystemWatchdog:
                 timeout=5
             )
 
+            # If the command itself failed, treat as not detected
             if result.returncode != 0:
                 return False
 
-            out = result.stdout
-            # Require the header and at least one numbered camera line
-            if "Available cameras:" not in out:
-                return False
+            out = result.stdout.lower()
 
+            # 1) Fast path: known sensors in your fleet
+            #    Examples from your nodes:
+            #    - "0 : ov5647 [2592x1944 10-bit gbrg] ..."
+            #    - "0 : imx708 [4608x2592 10-bit rggb] ..."
+            #    - "0 : imx708_wide [4608x2592 10-bit] ..."
+            known_sensors = ('ov5647', 'imx708', 'imx708_wide')
+            if any(sensor in out for sensor in known_sensors):
+                return True
+
+            # 2) Fallback: generic "numbered camera line" detection
+            #    Look for something like "0 : <name> [...]"
             for line in out.splitlines():
                 line = line.strip()
-                # Lines like: "0 : ov5647 [mode: ...]"
                 if line and line[0].isdigit() and " :" in line:
                     return True
 
+            # If we got here, no camera lines were found
             return False
 
         except (subprocess.TimeoutExpired, FileNotFoundError):
+            # rpicam-hello missing or hung: treat as not detected
             return False
+
     
     def _get_24h_stats(self):
         """
