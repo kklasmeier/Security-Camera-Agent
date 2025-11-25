@@ -132,6 +132,11 @@ class CircularBuffer:
         self.frame_count = 0
         self.last_frame_time = 0
         
+        # Frame hash tracking for freeze detection
+        from collections import deque
+        self.frame_hash_history = deque(maxlen=20)  # Last 20 frame hashes
+        self.frame_hash_timestamps = deque(maxlen=20)  # Timestamps for each hash
+        
         log(f"CircularBuffer initialized: {self.resolution[0]}x{self.resolution[1]} "
             f"@ {self.framerate}fps, capacity-driven buffer")
         
@@ -504,6 +509,40 @@ class CircularBuffer:
                 self.last_frame_time = time.time()
                 frame_count += 1
                 self.frame_count += 1
+                
+                # ===================================================================
+                # FRAME HASH TRACKING FOR FREEZE DETECTION
+                # ===================================================================
+                # Compute hash of raw frame to detect if camera is frozen
+                # Uses SHA256 for reliable detection - ~10-20ms overhead per frame
+                import hashlib
+                frame_hash = hashlib.sha256(frame.tobytes()).hexdigest()[:16]  # Short hash (64-bit)
+                
+                # Store hash and timestamp in ring buffer
+                self.frame_hash_history.append(frame_hash)
+                self.frame_hash_timestamps.append(time.time())
+                
+                # Periodic logging of hash status for debugging
+                if frame_count % 100 == 0:
+                    unique_recent = len(set(list(self.frame_hash_history)[-10:])) if len(self.frame_hash_history) >= 10 else 0
+                    
+                    # Show timestamp range to prove hashes are recent
+                    if len(self.frame_hash_timestamps) >= 10:
+                        oldest_hash_time = self.frame_hash_timestamps[-10]
+                        newest_hash_time = self.frame_hash_timestamps[-1]
+                        current_time = time.time()
+                        
+                        # Time since oldest and newest hash
+                        oldest_age = current_time - oldest_hash_time
+                        newest_age = current_time - newest_hash_time
+                        
+                        log(f"[HASH DEBUG] Frame #{frame_count}, hash={frame_hash}, "
+                            f"unique_in_last_10={unique_recent}, "
+                            f"oldest_hash={oldest_age:.1f}s_ago, newest_hash={newest_age:.1f}s_ago")
+                    else:
+                        log(f"[HASH DEBUG] Frame #{frame_count}, hash={frame_hash}, "
+                            f"unique_in_last_10={unique_recent} (building history...)")
+                # ===================================================================
 
                 # Debug log every 50 frames with timing info
                 if frame_count % 50 == 0:
@@ -977,12 +1016,20 @@ class CircularBuffer:
 
     def get_health(self):
         """Get health status for watchdog monitoring."""
+        # Calculate unique frame hashes for freeze detection
+        unique_hashes_recent = 0
+        if len(self.frame_hash_history) >= 10:
+            unique_hashes_recent = len(set(list(self.frame_hash_history)[-10:]))
+        
         return {
             'thread_alive': self.capture_thread.is_alive() if self.capture_thread else False,
             'last_frame_time': self.last_frame_time,
             'frame_count': self.frame_count,
             'running': self.running,
-            'camera_initialized': self.picam2 is not None
+            'camera_initialized': self.picam2 is not None,
+            'frame_hash_history': list(self.frame_hash_history),  # For detailed analysis
+            'frame_hash_timestamps': list(self.frame_hash_timestamps),
+            'unique_hashes_recent': unique_hashes_recent  # Quick check
         }
 
     def stop(self):

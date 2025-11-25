@@ -76,6 +76,10 @@ class SystemWatchdog:
         self.last_quick_check = 0
         self.last_detailed_report = 0
         
+        # Freeze detection tracking (prevent diagnostic spam)
+        self.last_freeze_diagnostic_time = 0
+        self.freeze_diagnostic_interval = 300  # Only capture diagnostics every 5 minutes
+        
         log("SystemWatchdog initialized")
     
     def start(self):
@@ -289,8 +293,12 @@ class SystemWatchdog:
         """
         issues = []
         
-        # Check frame capture
+        # ===================================================================
+        # ENHANCED FRAME CAPTURE CHECKING WITH FREEZE DETECTION
+        # ===================================================================
         cb_health = self.circular_buffer.get_health()
+        
+        # Check 1: Are we getting captures at all?
         if cb_health['last_frame_time']:
             time_since_frame = time.time() - cb_health['last_frame_time']
             if time_since_frame > 60:  # No frames for 60s
@@ -308,6 +316,47 @@ class SystemWatchdog:
                 
                 issues.append(f"NoFrames:{formatted_time}")
         
+        # Check 2: Are frames actually changing? (Freeze detection)
+        frame_health = self._check_frame_freeze(cb_health)
+        if frame_health['frozen']:
+            # Get motion detector state to provide context
+            md_health = self.motion_detector.get_health()
+            
+            # Only report as frozen if motion detector should be running
+            # (Not paused for streaming, not in cooldown)
+            if not md_health['paused'] and not md_health['in_cooldown']:
+                reason = frame_health['reason']
+                duration = frame_health.get('duration', 0)
+                
+                if duration < 60:
+                    duration_str = f"{int(duration)}s"
+                elif duration < 3600:
+                    duration_str = f"{int(duration/60)}m"
+                else:
+                    hours = int(duration/3600)
+                    minutes = int((duration % 3600)/60)
+                    duration_str = f"{hours}h{minutes}m"
+                
+                # Add issue with frozen indicator
+                if reason == 'identical_frames':
+                    unique = frame_health.get('unique_in_last_10', 0)
+                    issues.append(f"FrozenFrames:{duration_str}(unique:{unique}/10)")
+                    
+                    # Trigger comprehensive diagnostics (rate-limited)
+                    current_time = time.time()
+                    if current_time - self.last_freeze_diagnostic_time > self.freeze_diagnostic_interval:
+                        self._capture_camera_diagnostics()
+                        self.last_freeze_diagnostic_time = current_time
+                else:
+                    issues.append(f"CameraFrozen:{reason}")
+            else:
+                # Provide context in debug logging
+                if md_health['paused']:
+                    log(f"[FREEZE DEBUG] Identical frames detected but motion detector is PAUSED (streaming mode)", level="DEBUG")
+                elif md_health['in_cooldown']:
+                    log(f"[FREEZE DEBUG] Identical frames detected but motion detector is in COOLDOWN", level="DEBUG")
+        # ===================================================================
+        
         # Check motion detector
         current_checks = self.motion_detector.check_count
         if current_checks == self.last_motion_checks:
@@ -317,6 +366,172 @@ class SystemWatchdog:
                 issues.append("MotionStuck")
         
         return issues
+    
+    def _check_frame_freeze(self, cb_health):
+        """
+        Check if frames are actually changing or frozen.
+        
+        Uses frame hash history to detect if camera is stuck on same image.
+        
+        Args:
+            cb_health: Health dict from circular_buffer.get_health()
+        
+        Returns:
+            dict: {
+                'frozen': bool,
+                'reason': str,  # 'identical_frames', 'no_captures', or None
+                'duration': float,  # Seconds frozen
+                'frozen_hash': str,  # Hash of frozen frame
+                'unique_in_last_10': int  # Unique hashes in last 10 frames
+            }
+        """
+        # Check if we have hash data
+        if 'frame_hash_history' not in cb_health or not cb_health['frame_hash_history']:
+            return {'frozen': False}
+        
+        hashes = cb_health['frame_hash_history']
+        timestamps = cb_health.get('frame_hash_timestamps', [])
+        
+        # Need at least 10 frames to make a determination
+        if len(hashes) < 10:
+            return {'frozen': False}
+        
+        # Check last 10 frames for uniqueness
+        last_10_hashes = hashes[-10:]
+        unique_hashes = len(set(last_10_hashes))
+        
+        # If only 1 unique hash in last 10 frames = FROZEN
+        if unique_hashes == 1:
+            # Calculate how long we've been frozen
+            if timestamps and len(timestamps) >= 10:
+                freeze_duration = timestamps[-1] - timestamps[-10]
+            else:
+                freeze_duration = 0
+            
+            return {
+                'frozen': True,
+                'reason': 'identical_frames',
+                'duration': freeze_duration,
+                'frozen_hash': last_10_hashes[0],
+                'unique_in_last_10': unique_hashes
+            }
+        
+        # If very few unique hashes (2-3), might be starting to freeze
+        # Log this but don't report as frozen yet
+        if unique_hashes <= 3:
+            log(f"[FREEZE DEBUG] Low frame diversity: {unique_hashes}/10 unique hashes in recent frames", 
+                level="DEBUG")
+        
+        return {'frozen': False}
+
+    def _capture_camera_diagnostics(self):
+        """
+        Capture comprehensive camera diagnostics when freeze is detected.
+        
+        This provides detailed state information to help diagnose hardware
+        vs. software issues causing camera freezes.
+        """
+        log("="*60, level="ERROR")
+        log("🚨 CAMERA FREEZE DETECTED - CAPTURING DIAGNOSTICS", level="ERROR")
+        log("="*60, level="ERROR")
+        
+        try:
+            # 1. Circular Buffer State
+            cb_health = self.circular_buffer.get_health()
+            log("Circular Buffer State:", level="ERROR")
+            log(f"  Thread alive: {cb_health['thread_alive']}", level="ERROR")
+            log(f"  Camera initialized: {cb_health['camera_initialized']}", level="ERROR")
+            log(f"  Total frames captured: {cb_health['frame_count']}", level="ERROR")
+            log(f"  Last frame time: {time.time() - cb_health['last_frame_time']:.1f}s ago", level="ERROR")
+            
+            # 2. Frame Hash Analysis
+            if 'frame_hash_history' in cb_health:
+                hashes = cb_health['frame_hash_history']
+                timestamps = cb_health.get('frame_hash_timestamps', [])
+                
+                log("Frame Hash Analysis:", level="ERROR")
+                log(f"  Total hashes tracked: {len(hashes)}", level="ERROR")
+                log(f"  Unique hashes in history: {len(set(hashes))}", level="ERROR")
+                
+                if len(hashes) >= 10:
+                    last_10 = hashes[-10:]
+                    unique_last_10 = len(set(last_10))
+                    log(f"  Unique in last 10: {unique_last_10}", level="ERROR")
+                    log(f"  Last 3 hashes: {last_10[-3:]}", level="ERROR")
+                
+                if timestamps and len(timestamps) >= 10:
+                    current_time = time.time()
+                    oldest_hash_time = timestamps[-10]
+                    newest_hash_time = timestamps[-1]
+                    time_span = newest_hash_time - oldest_hash_time
+                    
+                    # Critical: Show age of hashes to verify they're recent
+                    oldest_age = current_time - oldest_hash_time
+                    newest_age = current_time - newest_hash_time
+                    
+                    log(f"  Hash history time span: {time_span:.1f}s", level="ERROR")
+                    log(f"  Oldest hash age: {oldest_age:.1f}s ago", level="ERROR")
+                    log(f"  Newest hash age: {newest_age:.1f}s ago", level="ERROR")
+                    
+                    # Warn if hashes are stale
+                    if oldest_age > 300:  # More than 5 minutes old
+                        log(f"  ⚠️  WARNING: Hashes are STALE (>5 minutes old)", level="ERROR")
+                        log(f"  ⚠️  This indicates capture thread may be stuck", level="ERROR")
+                    elif newest_age > 10:  # More than 10 seconds old
+                        log(f"  ⚠️  WARNING: Newest hash is not recent (>10s old)", level="ERROR")
+                        log(f"  ⚠️  Capture may have stopped or slowed", level="ERROR")
+                    else:
+                        log(f"  ✅ Hashes are RECENT (capture thread active)", level="ERROR")
+            
+            # 3. Motion Detector State
+            md_health = self.motion_detector.get_health()
+            log("Motion Detector State:", level="ERROR")
+            log(f"  Thread alive: {md_health['thread_alive']}", level="ERROR")
+            log(f"  Paused: {md_health['paused']}", level="ERROR")
+            log(f"  In cooldown: {md_health['in_cooldown']}", level="ERROR")
+            log(f"  Check count: {md_health['check_count']}", level="ERROR")
+            
+            # 4. Hardware Camera Detection
+            camera_detected = self._check_camera_detected()
+            log("Hardware State:", level="ERROR")
+            log(f"  Camera detected by OS: {camera_detected}", level="ERROR")
+            
+            # 5. System Resources
+            import psutil
+            memory = psutil.virtual_memory()
+            log("System Resources:", level="ERROR")
+            log(f"  Memory usage: {memory.percent}%", level="ERROR")
+            log(f"  Available memory: {memory.available / (1024**2):.0f} MB", level="ERROR")
+            
+            # 6. Picamera2 State (if accessible)
+            if hasattr(self.circular_buffer, 'picam2') and self.circular_buffer.picam2:
+                try:
+                    log("Picamera2 State:", level="ERROR")
+                    log(f"  Camera object exists: True", level="ERROR")
+                    # Try to get camera properties
+                    props = self.circular_buffer.picam2.camera_properties
+                    if props:
+                        model = props.get('Model', 'unknown')
+                        log(f"  Camera model: {model}", level="ERROR")
+                except Exception as e:
+                    log(f"  Error accessing Picamera2: {e}", level="ERROR")
+            
+            log("="*60, level="ERROR")
+            log("DIAGNOSTIC CAPTURE COMPLETE", level="ERROR")
+            log("="*60, level="ERROR")
+            log("", level="ERROR")
+            log("RECOMMENDED ACTIONS:", level="ERROR")
+            log("1. Check if camera hardware is responsive", level="ERROR")
+            log("2. Try manually restarting the camera service", level="ERROR")
+            log("3. Check for hardware issues (cable, power, heat)", level="ERROR")
+            log("4. Review logs for exceptions before freeze", level="ERROR")
+            log("="*60, level="ERROR")
+            
+        except Exception as e:
+            log(f"Error capturing diagnostics: {e}", level="ERROR")
+            import traceback
+            traceback.print_exc()
+
     
     def _check_hardware(self):
         """
