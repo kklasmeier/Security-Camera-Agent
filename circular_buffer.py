@@ -486,6 +486,11 @@ class CircularBuffer:
     def _capture_pictures(self):
         import gc
         
+        # Thread state tracking for diagnostics
+        self.capture_thread_state = "STARTING"
+        self.last_state_change_time = time.time()
+        self.last_successful_capture_time = 0
+        
         capture_start_time = time.time()  # Local variable, not self attribute
         log(f"Picture capture loop started (initial interval: {self.capture_interval}s)")
         frame_count = 0
@@ -501,11 +506,44 @@ class CircularBuffer:
                 # Capture frame (ensure camera initialized)
                 if self.picam2 is None:
                     # Picamera2 not yet initialized; wait briefly and retry to avoid attribute errors
+                    self.capture_thread_state = "WAITING_FOR_CAMERA_INIT"
+                    self.last_state_change_time = time.time()
                     log("capture_array skipped: picam2 not initialized yet, waiting...", level="WARNING")
                     time.sleep(0.1)
                     continue
 
-                frame = self.picam2.capture_array()
+                # ===================================================================
+                # CRITICAL SECTION: capture_array() can hang
+                # ===================================================================
+                try:
+                    self.capture_thread_state = "CALLING_CAPTURE_ARRAY"
+                    self.last_state_change_time = time.time()
+                    capture_call_start = time.time()
+                    
+                    frame = self.picam2.capture_array()
+                    
+                    capture_call_duration = time.time() - capture_call_start
+                    self.capture_thread_state = "CAPTURE_SUCCESSFUL"
+                    self.last_state_change_time = time.time()
+                    self.last_successful_capture_time = time.time()
+                    
+                    # Log slow captures
+                    if capture_call_duration > 2.0:
+                        log(f"⚠️  SLOW CAPTURE: capture_array() took {capture_call_duration:.2f}s", level="WARNING")
+                    
+                except Exception as e:
+                    self.capture_thread_state = f"CAPTURE_EXCEPTION: {type(e).__name__}"
+                    self.last_state_change_time = time.time()
+                    log(f"🚨 EXCEPTION in capture_array(): {e}", level="ERROR")
+                    log(f"Exception type: {type(e).__name__}", level="ERROR")
+                    import traceback
+                    log(f"Traceback: {traceback.format_exc()}", level="ERROR")
+                    
+                    # Try to recover
+                    time.sleep(1.0)
+                    continue
+                # ===================================================================
+                
                 self.last_frame_time = time.time()
                 frame_count += 1
                 self.frame_count += 1
@@ -513,6 +551,9 @@ class CircularBuffer:
                 # ===================================================================
                 # FRAME HASH TRACKING FOR FREEZE DETECTION
                 # ===================================================================
+                self.capture_thread_state = "COMPUTING_HASH"
+                self.last_state_change_time = time.time()
+                
                 # Compute hash of raw frame to detect if camera is frozen
                 # Uses SHA256 for reliable detection - ~10-20ms overhead per frame
                 import hashlib
@@ -521,6 +562,9 @@ class CircularBuffer:
                 # Store hash and timestamp in ring buffer
                 self.frame_hash_history.append(frame_hash)
                 self.frame_hash_timestamps.append(time.time())
+                
+                self.capture_thread_state = "HASH_COMPLETE"
+                self.last_state_change_time = time.time()
                 
                 # Periodic logging of hash status for debugging
                 if frame_count % 100 == 0:
@@ -554,10 +598,16 @@ class CircularBuffer:
                         f"(object id={id(self)})")
                 
                 # Update two-frame buffer
+                self.capture_thread_state = "UPDATING_FRAME_BUFFER"
+                self.last_state_change_time = time.time()
+                
                 with self.frame_lock:
                     old_previous = self.previous_frame
                     self.previous_frame = self.current_frame
                     self.current_frame = frame
+                
+                self.capture_thread_state = "FRAME_BUFFER_UPDATED"
+                self.last_state_change_time = time.time()
                 
                 # Explicitly delete old frame reference
                 if old_previous is not None:
@@ -569,6 +619,9 @@ class CircularBuffer:
                 
                 # Responsive sleep that checks for interval changes
                 # Read target at start of sleep period
+                self.capture_thread_state = "SLEEPING"
+                self.last_state_change_time = time.time()
+                
                 sleep_start = time.time()
                 initial_interval = self.capture_interval
                 
@@ -1021,6 +1074,12 @@ class CircularBuffer:
         if len(self.frame_hash_history) >= 10:
             unique_hashes_recent = len(set(list(self.frame_hash_history)[-10:]))
         
+        # Get thread state info
+        current_time = time.time()
+        thread_state = getattr(self, 'capture_thread_state', 'UNKNOWN')
+        time_in_current_state = current_time - getattr(self, 'last_state_change_time', current_time)
+        time_since_successful_capture = current_time - getattr(self, 'last_successful_capture_time', 0)
+        
         return {
             'thread_alive': self.capture_thread.is_alive() if self.capture_thread else False,
             'last_frame_time': self.last_frame_time,
@@ -1029,7 +1088,10 @@ class CircularBuffer:
             'camera_initialized': self.picam2 is not None,
             'frame_hash_history': list(self.frame_hash_history),  # For detailed analysis
             'frame_hash_timestamps': list(self.frame_hash_timestamps),
-            'unique_hashes_recent': unique_hashes_recent  # Quick check
+            'unique_hashes_recent': unique_hashes_recent,  # Quick check
+            'thread_state': thread_state,  # NEW: What is thread doing?
+            'time_in_current_state': time_in_current_state,  # NEW: How long in this state?
+            'time_since_successful_capture': time_since_successful_capture  # NEW: Time since last success
         }
 
     def stop(self):

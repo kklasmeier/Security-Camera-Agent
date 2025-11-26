@@ -234,12 +234,28 @@ class SystemWatchdog:
         """
         status = {}
         
-        # CircularBuffer
+        # CircularBuffer - Enhanced with state detection
         cb_health = self.circular_buffer.get_health()
         time_since_frame = time.time() - cb_health['last_frame_time'] if cb_health['last_frame_time'] else 999
+        
+        # Check for hung thread
+        thread_state = cb_health.get('thread_state', 'UNKNOWN')
+        time_in_state = cb_health.get('time_in_current_state', 0)
+        time_since_success = cb_health.get('time_since_successful_capture', 999)
+        
+        # Detect hung states
+        if thread_state == "CALLING_CAPTURE_ARRAY" and time_in_state > 5.0:
+            details = f"🚨 HUNG in capture_array() for {time_in_state:.1f}s!"
+        elif thread_state == "SLEEPING" and time_in_state > 10.0:
+            details = f"⚠️  Stuck sleeping for {time_in_state:.1f}s"
+        elif time_since_frame < 60:
+            details = f"last frame {time_since_frame:.1f}s ago, state: {thread_state}"
+        else:
+            details = f"STALE FRAMES ({time_since_frame/60:.0f}m), state: {thread_state}, in_state: {time_in_state:.1f}s"
+        
         status['CircularBufferCapture'] = {
             'alive': cb_health['thread_alive'],
-            'details': f"last frame {time_since_frame:.1f}s ago" if time_since_frame < 60 else "STALE FRAMES"
+            'details': details
         }
         
         # MotionDetector
@@ -443,6 +459,25 @@ class SystemWatchdog:
             log(f"  Camera initialized: {cb_health['camera_initialized']}", level="ERROR")
             log(f"  Total frames captured: {cb_health['frame_count']}", level="ERROR")
             log(f"  Last frame time: {time.time() - cb_health['last_frame_time']:.1f}s ago", level="ERROR")
+            
+            # NEW: Thread state diagnostics
+            thread_state = cb_health.get('thread_state', 'UNKNOWN')
+            time_in_state = cb_health.get('time_in_current_state', 0)
+            time_since_success = cb_health.get('time_since_successful_capture', 0)
+            
+            log("Thread State Diagnostics:", level="ERROR")
+            log(f"  Current state: {thread_state}", level="ERROR")
+            log(f"  Time in current state: {time_in_state:.1f}s", level="ERROR")
+            log(f"  Time since successful capture: {time_since_success:.1f}s", level="ERROR")
+            
+            # Interpret state
+            if thread_state == "CALLING_CAPTURE_ARRAY" and time_in_state > 5.0:
+                log(f"  🚨 CRITICAL: Thread HUNG in capture_array() call!", level="ERROR")
+                log(f"  🚨 This indicates Picamera2/camera driver is unresponsive", level="ERROR")
+            elif thread_state == "SLEEPING" and time_in_state > 10.0:
+                log(f"  ⚠️  Thread stuck in sleep loop (may be normal)", level="ERROR")
+            elif time_since_success > 60:
+                log(f"  ⚠️  No successful captures for {time_since_success/60:.1f} minutes", level="ERROR")
             
             # 2. Frame Hash Analysis
             if 'frame_hash_history' in cb_health:
