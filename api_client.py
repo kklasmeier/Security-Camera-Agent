@@ -399,11 +399,12 @@ class APIClient:
         """
         Send batch of log entries to central server.
         
-        BEST-EFFORT OPERATION: Retries up to 2 times.
+        BEST-EFFORT OPERATION with smart retry strategy:
+        - HTTP 422: Split batch in half and retry (batch too large)
+        - Other errors: Retry up to 2 times with delays
+        
         Logs are not critical - local logging is primary, API is secondary.
         If all retries fail, logs remain local only.
-        
-        Retry strategy: 1s, 5s delays
         
         Args:
             log_entries: List of dicts with keys: source, timestamp, level, message
@@ -425,37 +426,93 @@ class APIClient:
         if not log_entries:
             return True  # Nothing to send
         
-        max_retries = 2
-        retry_delays = [1, 5]
-        
-        for attempt in range(1, max_retries + 1):
-            try:
-                response = self.session.post(
-                    f"{self.base_url}/logs",
-                    json=log_entries,
-                    timeout=self.timeout
-                )
+        # Recursive helper to send batch with smart splitting on 422
+        def send_batch(entries: List[Dict[str, Any]], depth: int = 0) -> bool:
+            """
+            Recursively send batch, splitting on HTTP 422 errors.
+            
+            Args:
+                entries: Log entries to send
+                depth: Recursion depth (prevent infinite recursion)
+            
+            Returns:
+                bool: True if all entries sent successfully
+            """
+            if not entries:
+                return True
+            
+            # Prevent infinite recursion
+            if depth > 5:
+                log(f"Max recursion depth reached, abandoning {len(entries)} logs", level="ERROR")
+                return False
+            
+            # If batch is 1 log and still failing, give up
+            if len(entries) == 1 and depth > 0:
+                entry = entries[0]
+                log(f"Single log entry rejected by server (HTTP 422): "
+                    f"level={entry.get('level')}, "
+                    f"msg_len={len(entry.get('message', ''))}, "
+                    f"msg_preview='{entry.get('message', '')[:50]}'", 
+                    level="ERROR")
+                return False
+            
+            max_retries = 2
+            retry_delays = [1, 5]
+            
+            for attempt in range(1, max_retries + 1):
+                try:
+                    response = self.session.post(
+                        f"{self.base_url}/logs",
+                        json=entries,
+                        timeout=self.timeout
+                    )
+                    
+                    if response.status_code in [200, 201]:
+                        data = response.json()
+                        count = data.get("logs_inserted", len(entries))
+                        if depth == 0:
+                            log(f"Sent {count} log entries to central server", level="DEBUG")
+                        else:
+                            log(f"Sent {count} log entries (split batch, depth={depth})", level="DEBUG")
+                        return True
+                    
+                    elif response.status_code == 422:
+                        # Batch too large - split and retry
+                        if len(entries) <= 1:
+                            log(f"HTTP 422 for single log entry - cannot split further", level="ERROR")
+                            return False
+                        
+                        mid = len(entries) // 2
+                        batch1 = entries[:mid]
+                        batch2 = entries[mid:]
+                        
+                        log(f"HTTP 422 - splitting batch of {len(entries)} into {len(batch1)} + {len(batch2)}", 
+                            level="WARNING")
+                        
+                        # Recursively send both halves
+                        success1 = send_batch(batch1, depth + 1)
+                        success2 = send_batch(batch2, depth + 1)
+                        
+                        return success1 and success2
+                    
+                    else:
+                        log(f"Log send failed (attempt {attempt}): HTTP {response.status_code}", level="WARNING")
                 
-                if response.status_code in [200, 201]:
-                    data = response.json()
-                    count = data.get("logs_inserted", len(log_entries))
-                    log(f"Sent {count} log entries to central server", level="DEBUG")
-                    return True
-                else:
-                    log(f"Log send failed (attempt {attempt}): HTTP {response.status_code}", level="WARNING")
+                except requests.exceptions.RequestException as e:
+                    log(f"Log send failed (attempt {attempt}): {e}", level="WARNING")
+                
+                except Exception as e:
+                    log(f"Unexpected error sending logs (attempt {attempt}): {e}", level="ERROR")
+                
+                # Retry with delay (but not for 422, which splits immediately)
+                if attempt < max_retries:
+                    time.sleep(retry_delays[attempt - 1])
             
-            except requests.exceptions.RequestException as e:
-                log(f"Log send failed (attempt {attempt}): {e}", level="WARNING")
-            
-            except Exception as e:
-                log(f"Unexpected error sending logs (attempt {attempt}): {e}", level="ERROR")
-            
-            # Retry with delay
-            if attempt < max_retries:
-                time.sleep(retry_delays[attempt - 1])
+            log(f"Failed to send {len(entries)} log entries after {max_retries} attempts", level="ERROR")
+            return False
         
-        log(f"Failed to send {len(log_entries)} log entries after {max_retries} attempts", level="ERROR")
-        return False
+        # Start the recursive send
+        return send_batch(log_entries, depth=0)
     
     def check_health(self) -> bool:
         """

@@ -45,6 +45,17 @@ class EnhancedLogger:
         logger.stop()
     """
     
+    # Maximum logs per API batch to prevent HTTP 422 errors
+    # Conservative limit to ensure reliable transmission
+    MAX_BATCH_SIZE = 20
+    
+    # Maximum message length per log entry (prevent oversized payloads)
+    MAX_MESSAGE_LENGTH = 1000
+    
+    # Adaptive flushing thresholds
+    FAST_FLUSH_THRESHOLD = 10  # If queue has this many logs, flush more frequently
+    FAST_FLUSH_INTERVAL = 0.5  # Flush every 0.5 seconds when queue is backing up
+    
     def __init__(self, log_dir=None):
         """
         Initialize logger with file, console, and API destinations.
@@ -238,34 +249,69 @@ class EnhancedLogger:
         """
         Background thread that sends queued logs to central server.
         
-        Runs in a loop, flushing logs every batch_interval seconds.
+        Uses adaptive timing:
+        - Normal mode: Flushes every batch_interval seconds (typically 5s)
+        - Fast mode: When queue has >= FAST_FLUSH_THRESHOLD logs, flushes every 0.5s
+        
+        This prevents queue buildup during heavy logging periods while maintaining
+        efficiency during normal operation.
+        
         This is a daemon thread and will automatically stop when main program exits.
         """
         while self.running:
-            # Wait for batch interval
-            time.sleep(self.batch_interval)
+            # Check queue size for adaptive timing
+            queue_size = self.log_queue.qsize()
+            
+            if queue_size >= self.FAST_FLUSH_THRESHOLD:
+                # Fast mode: Queue is backing up, flush more frequently
+                wait_time = self.FAST_FLUSH_INTERVAL
+            else:
+                # Normal mode: Standard interval
+                wait_time = self.batch_interval
+            
+            # Wait for the determined interval
+            time.sleep(wait_time)
             
             # Flush any queued logs to API
             self._flush_logs()
     
     def _flush_logs(self):
         """
-        Send all queued logs to central server via API.
+        Send queued logs to central server via API.
         
         Called automatically by background writer thread.
         Can also be called manually to force immediate send.
         
-        Logs are sent as a batch to reduce API calls.
+        Logs are sent in batches up to MAX_BATCH_SIZE to prevent HTTP 422 errors.
+        If more logs remain in queue, they'll be sent in the next batch cycle.
         If API call fails, logs remain in local file.
         """
         if self.log_queue.empty():
             return
         
-        # Collect all queued logs
+        # Track initial queue size for debugging
+        initial_queue_size = self.log_queue.qsize()
+        
+        # Collect logs up to MAX_BATCH_SIZE
         log_batch = []
-        while not self.log_queue.empty():
+        batch_count = 0
+        items_pulled = 0  # Track how many we've pulled from queue
+        
+        while not self.log_queue.empty() and items_pulled < self.MAX_BATCH_SIZE:
             try:
                 timestamp, level, message = self.log_queue.get_nowait()
+                items_pulled += 1  # Count items pulled, even if skipped
+                
+                # Truncate message if too long to prevent HTTP 422 errors
+                if len(message) > self.MAX_MESSAGE_LENGTH:
+                    message = message[:self.MAX_MESSAGE_LENGTH - 3] + "..."
+                
+                # Skip empty messages (would fail server validation)
+                if not message or not message.strip():
+                    continue  # Skip but don't add to batch
+                
+                # Sanitize message - remove any problematic characters
+                message = message.strip()
                 
                 # Format for API
                 log_entry = {
@@ -275,21 +321,35 @@ class EnhancedLogger:
                     "message": message
                 }
                 log_batch.append(log_entry)
+                batch_count += 1
             except:
                 break
         
         # Send batch to central server via API
         if log_batch:
+            remaining = self.log_queue.qsize()
             try:
                 success = self.api_client.send_logs(log_batch)
                 if success:
-                    # Optional: log successful API send to file only (not console to avoid spam)
-                    # self._write_to_file(f"[DEBUG] Sent {len(log_batch)} log entries to central server")
-                    pass
+                    # Log detailed info about the flush
+                    if remaining > 0 or initial_queue_size > self.FAST_FLUSH_THRESHOLD:
+                        self._write_to_file(
+                            f"[DEBUG] Sent {len(log_batch)} log entries to API "
+                            f"(queue: {initial_queue_size} → {remaining})"
+                        )
+                else:
+                    # Log when send fails
+                    self._write_to_file(
+                        f"[WARNING] Failed to send {len(log_batch)} log entries "
+                        f"(queue: {initial_queue_size}, remaining: {remaining})"
+                    )
                 # If failed, logs are still in local file (which is the important part)
             except Exception as e:
                 # Log API errors to file only (not console to avoid spam)
-                self._write_to_file(f"[ERROR] Failed to send log batch to API: {e}")
+                self._write_to_file(
+                    f"[ERROR] Failed to send log batch to API: {e} "
+                    f"(attempted {len(log_batch)} logs, queue had {initial_queue_size})"
+                )
     
     def stop(self):
         """

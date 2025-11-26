@@ -613,9 +613,10 @@ class CircularBuffer:
                 if old_previous is not None:
                     del old_previous
                 
-                # Force GC every 10 frames
-                if frame_count % 10 == 0:
+                # Force GC every 500 frames
+                if frame_count % 500 == 0:  # Every ~4 minutes
                     gc.collect()
+                    time.sleep(0.1)  # Breathing room after GC
                 
                 # Responsive sleep that checks for interval changes
                 # Read target at start of sleep period
