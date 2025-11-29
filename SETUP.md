@@ -384,6 +384,188 @@ curl http://192.168.1.26:8000/api/v1/health
 
 ---
 
+Below is the **updated SETUP.md** with a brand-new **Section 13: Reboot Watchdog Installation**, fully formatted and professionally integrated so it matches your current documentation style.
+
+I did **not** change any other sections — everything is added cleanly and safely.
+
+You can paste this directly below Section 12.
+
+---
+
+## 13. 🛡️ Optional — Install the Reboot Watchdog Service
+
+The **Reboot Watchdog** is an optional systemd service that continuously monitors camera health based on logs reported to the Central Server.
+
+If the camera appears hung (for example, repeated `NoFrames` errors for too long), the watchdog will automatically:
+
+* detect the failure
+* apply safety checks
+* reboot the Raspberry Pi
+* prevent reboot loops using rate limiting
+* record activity in a persistent history file
+
+This dramatically improves system reliability for unattended camera nodes.
+
+---
+
+### 🔧 Install the Reboot Watchdog Service
+
+Create the service file:
+
+```bash
+sudo tee /etc/systemd/system/camera-reboot-watchdog.service > /dev/null <<'EOF'
+[Unit]
+Description=Security Camera Reboot Watchdog Service
+Documentation=file:///home/pi/Security-Camera-Agent/REBOOT_WATCHDOG_INSTALLATION.md
+After=network.target security-camera-agent.service
+Wants=security-camera-agent.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/pi/Security-Camera-Agent
+
+ExecStart=/usr/bin/python3 /home/pi/Security-Camera-Agent/camera_reboot_watchdog.py
+
+Restart=always
+RestartSec=30
+
+MemoryLimit=100M
+CPUQuota=10%
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=camera-reboot-watchdog
+
+# Security Hardening
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/home/pi/Security-Camera-Agent /var/tmp
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+Reload systemd to register the new service:
+
+```bash
+sudo systemctl daemon-reload
+```
+
+Enable it so it starts on boot:
+
+```bash
+sudo systemctl enable camera-reboot-watchdog
+```
+
+Start it immediately:
+
+```bash
+sudo systemctl start camera-reboot-watchdog
+```
+
+---
+
+### 📊 Check Watchdog Status
+
+```bash
+sudo systemctl status camera-reboot-watchdog
+```
+
+You should see:
+
+```
+Active: active (running)
+Main PID: xxxx (/usr/bin/python3 ...)
+```
+
+---
+
+### 📜 View Watchdog Logs
+
+```bash
+sudo journalctl -u camera-reboot-watchdog -n 100 --no-pager
+```
+
+Follow real-time logs:
+
+```bash
+sudo journalctl -u camera-reboot-watchdog -f
+```
+
+---
+
+### 📁 Check Watchdog Reboot History
+
+The watchdog stores its state in:
+
+```
+/var/tmp/camera-reboot-history.json
+```
+
+To see a formatted summary:
+
+```bash
+./camera_agent.sh watchdog-history
+```
+
+Example output:
+
+```
+📊 Reboot Watchdog History
+--------------------------
+Recent Reboots:
+ • 2025-11-29 04:22:10
+ • 2025-11-29 06:15:33
+
+Pause State:
+ Not paused.
+```
+
+---
+
+### 🧩 How the Reboot Watchdog Works
+
+The reboot watchdog monitors the camera using several signals:
+
+| Mechanism              | Description                                          |
+| ---------------------- | ---------------------------------------------------- |
+| **NoFrames detection** | Detects when camera stops delivering frames          |
+| **Error log analysis** | Queries ERROR logs from Central Server               |
+| **Hang threshold**     | Camera must be hung for X minutes before reboot      |
+| **Cooldown**           | Safety delay after each reboot                       |
+| **Rate limiting**      | Maximum reboots allowed per hour                     |
+| **Auto-pause**         | Automatically pauses for 24h if reboot loop detected |
+
+Safety is built in — *it will never rapidly reboot your Pi*.
+
+---
+
+### ▶️ Manage the Watchdog Using the Helper Script
+
+Your `camera_agent.sh` script now supports clean, uniform commands:
+
+| Command                                   | Description           |
+| ----------------------------------------- | --------------------- |
+| `sudo ./camera_agent.sh watchdog-status`  | Check watchdog status |
+| `sudo ./camera_agent.sh watchdog-start`   | Start watchdog        |
+| `sudo ./camera_agent.sh watchdog-stop`    | Stop watchdog         |
+| `sudo ./camera_agent.sh watchdog-restart` | Restart watchdog      |
+| `sudo ./camera_agent.sh watchdog-logs`    | View logs             |
+| `sudo ./camera_agent.sh watchdog-follow`  | Follow logs live      |
+| `./camera_agent.sh watchdog-history`      | View reboot history   |
+
+Example:
+
+```bash
+sudo ./camera_agent.sh watchdog-status
+```
+---
+
 ## ✅ Done!
 
 Your camera node should now:
