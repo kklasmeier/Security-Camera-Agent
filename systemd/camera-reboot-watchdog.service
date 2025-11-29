@@ -1,0 +1,40 @@
+[Unit]
+Description=Security Camera Reboot Watchdog Service
+Documentation=file:///home/pi/Security-Camera-Agent/REBOOT_WATCHDOG_INSTALLATION.md
+After=network.target security-camera-agent.service
+Wants=security-camera-agent.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# The script needs the repo directory as working directory
+WorkingDirectory=/home/pi/Security-Camera-Agent
+
+# Correct path + run using Python3 for reliability
+ExecStart=/usr/bin/python3 /home/pi/Security-Camera-Agent/camera_reboot_watchdog.py
+
+# Restart policy
+Restart=always
+RestartSec=30
+
+# Resource limits
+MemoryLimit=100M
+CPUQuota=10%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=camera-reboot-watchdog
+
+# Security hardening
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/home/pi/Security-Camera-Agent /var/tmp
+
+[Install]
+WantedBy=multi-user.target
+

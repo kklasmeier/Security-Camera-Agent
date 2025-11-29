@@ -1,0 +1,14 @@
+[Unit]
+Description=Security Camera Agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/Security-Camera-Agent
+ExecStart=/usr/bin/python3 /home/pi/Security-Camera-Agent/sec_cam_main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
