@@ -183,6 +183,39 @@ class Config:
         # Cameras now record raw H.264, central server handles conversion
         
         # ====================================================================
+        # REBOOT WATCHDOG CONFIGURATION
+        # ====================================================================
+        # Automatic camera reboot on hang detection
+        
+        # Core timing
+        self.REBOOT_WATCHDOG_CHECK_INTERVAL = 300          # 5 minutes between checks
+        self.REBOOT_WATCHDOG_HANG_THRESHOLD = 60           # Trigger reboot after 60m of NoFrames
+        
+        # Safety limits
+        self.REBOOT_WATCHDOG_COOLDOWN = 300                # 5 minutes minimum between reboots
+        self.REBOOT_WATCHDOG_MAX_REBOOTS_PER_HOUR = 5      # Trigger pause after 5 reboots/hour
+        self.REBOOT_WATCHDOG_PAUSE_DURATION = 24           # Pause reboots for 24 hours
+        
+        # Reboot execution
+        self.REBOOT_WATCHDOG_PRE_REBOOT_DELAY = 60         # Grace period before reboot (seconds)
+        
+        # Post-reboot monitoring
+        self.REBOOT_WATCHDOG_POST_REBOOT_CHECK_INTERVAL = 30    # Check every 30 seconds
+        self.REBOOT_WATCHDOG_POST_REBOOT_TIMEOUT = 300          # Give up after 5 minutes
+        
+        # Feature flags
+        self.REBOOT_WATCHDOG_ENABLED = True                     # Master on/off switch
+        self.REBOOT_WATCHDOG_CHECK_STREAMING = True             # Skip reboot if streaming
+        
+        # Tracking files
+        self.REBOOT_WATCHDOG_HISTORY_FILE = '/var/tmp/camera-reboot-history.json'
+        self.REBOOT_WATCHDOG_DISABLE_FLAG = '/var/tmp/disable-auto-reboot'
+        
+        # Camera Control API endpoint (local)
+        self.CAMERA_CONTROL_API_PORT = 5000
+        self.CAMERA_CONTROL_API_BASE = f"http://localhost:{self.CAMERA_CONTROL_API_PORT}"
+        
+        # ====================================================================
         # MOTION DETECTION SETTINGS
         # ====================================================================
         
