@@ -31,7 +31,7 @@ import json
 import re
 import subprocess
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 
 # Add camera agent directory to Python path
@@ -198,7 +198,8 @@ class CameraHealthChecker:
         """
         try:
             # Query last hour of ERROR logs from this camera
-            one_hour_ago = datetime.now(timezone.utc) - timedelta(hours=1)
+            # IMPORTANT: Use local time, not UTC, to match central server timezone
+            one_hour_ago = datetime.now() - timedelta(hours=1)
             
             response = self.api_client.session.get(
                 f"{self.api_client.base_url}/logs",
