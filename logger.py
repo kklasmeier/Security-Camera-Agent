@@ -9,6 +9,7 @@ Triple logging system:
 Features:
 - Thread-safe file writing
 - Automatic log rotation (daily files)
+- Automatic purge of logs older than LOG_RETENTION_DAYS
 - Non-blocking API sends
 - Configurable log levels per destination
 - Memory-efficient batching
@@ -19,7 +20,7 @@ FIXED: Removed os.fsync() to prevent midnight deadlock
 import threading
 import time
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from queue import Queue
 from pathlib import Path
 from config import config
@@ -85,6 +86,7 @@ class EnhancedLogger:
         self.current_log_file = None
         self.current_date = None
         self._open_log_file()
+        self._purge_old_logs()
         
         # Control flags
         self.running = True
@@ -104,14 +106,51 @@ class EnhancedLogger:
         self.writer_thread.start()
         
         # Log initialization
+        retention_days = self._get_retention_days()
         init_msg = (f"Enhanced Logger initialized\n"
                    f"  Log directory: {self.log_dir}\n"
+                   f"  Log retention: {retention_days} days\n"
                    f"  API batching: every {self.batch_interval}s\n"
                    f"  Camera: {config.CAMERA_ID}")
         print(init_msg)
         self._write_to_file("="*60, skip_timestamp=True)
         self._write_to_file(init_msg)
         self._write_to_file("="*60, skip_timestamp=True)
+    
+    def _get_retention_days(self):
+        try:
+            return int(config.LOG_RETENTION_DAYS)
+        except AttributeError:
+            return 14
+    
+    def _purge_old_logs(self):
+        """Delete runtime_YYYYMMDD.log files older than LOG_RETENTION_DAYS."""
+        retention_days = self._get_retention_days()
+        if retention_days <= 0:
+            return
+        
+        cutoff = datetime.now().date() - timedelta(days=retention_days)
+        deleted = 0
+        
+        for path in self.log_dir.glob("runtime_*.log"):
+            if self.current_date and path.name == f"runtime_{self.current_date}.log":
+                continue
+            try:
+                file_date = datetime.strptime(
+                    path.stem.replace("runtime_", ""), "%Y%m%d"
+                ).date()
+            except ValueError:
+                continue
+            if file_date < cutoff:
+                try:
+                    path.unlink()
+                    deleted += 1
+                    print(f"[LOG PURGE] Deleted old log: {path.name}")
+                except OSError as e:
+                    print(f"[WARNING] Could not delete {path.name}: {e}")
+        
+        if deleted:
+            print(f"[LOG PURGE] Removed {deleted} log file(s) older than {retention_days} days")
     
     def _open_log_file(self):
         """
@@ -165,6 +204,7 @@ class EnhancedLogger:
                         print(f"[WARNING] Error closing old log file: {e}")
                 
                 print(f"[LOG ROTATION] Rotation complete!")
+                self._purge_old_logs()
                 
             except Exception as e:
                 error_msg = f"Failed to rotate log file: {e}"

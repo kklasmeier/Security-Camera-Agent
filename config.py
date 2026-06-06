@@ -285,6 +285,9 @@ class Config:
         # Send when buffer reaches this size OR interval expires (whichever comes first)
         self.LOG_BUFFER_SIZE = 100
         
+        # Delete local runtime_*.log files older than this many days (0 = disable purge)
+        self.LOG_RETENTION_DAYS = 14
+        
         # ====================================================================
         # SYSTEM SETTINGS
         # ====================================================================
