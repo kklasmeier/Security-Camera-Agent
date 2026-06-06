@@ -6,8 +6,10 @@ Wants=security-camera-agent.service
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=pi
+Group=pi
+AmbientCapabilities=CAP_SYS_BOOT
+CapabilityBoundingSet=CAP_SYS_BOOT
 
 # The script needs the repo directory as working directory
 WorkingDirectory=/home/pi/Security-Camera-Agent

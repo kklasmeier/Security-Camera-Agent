@@ -422,8 +422,10 @@ Wants=security-camera-agent.service
 
 [Service]
 Type=simple
-User=root
-Group=root
+User=pi
+Group=pi
+AmbientCapabilities=CAP_SYS_BOOT
+CapabilityBoundingSet=CAP_SYS_BOOT
 WorkingDirectory=/home/pi/Security-Camera-Agent
 
 ExecStart=/usr/bin/python3 /home/pi/Security-Camera-Agent/camera_reboot_watchdog.py

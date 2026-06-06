@@ -4,7 +4,7 @@ Security Camera System - Reboot Watchdog Service
 =================================================
 Monitors camera health and automatically reboots on hang detection.
 
-This service runs as root (separate from camera agent) and:
+This service runs as pi with CAP_SYS_BOOT (separate from camera agent) and:
 - Queries central server for camera health status
 - Detects NoFrames errors lasting > 60 minutes
 - Checks safety limits before rebooting
@@ -486,7 +486,7 @@ class RebootWatchdog:
         log(f"[WATCHDOG REBOOT] Executing system reboot NOW", level="ERROR")
         
         try:
-            subprocess.run(['reboot'], check=True)
+            subprocess.run(['systemctl', 'reboot'], check=True)
         except Exception as e:
             log(f"[WATCHDOG REBOOT] FAILED to execute reboot: {e}", level="ERROR")
 
