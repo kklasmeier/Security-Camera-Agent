@@ -5,22 +5,23 @@ Security Camera System - Reboot Watchdog Service
 Monitors camera health and automatically reboots on hang detection.
 
 This service runs as pi with CAP_SYS_BOOT (separate from camera agent) and:
-- Queries central server for camera health status
+- Reads local health status from system_watchdog (primary)
+- Optionally queries central server for fleet visibility (not required for reboot)
 - Detects NoFrames errors lasting > 60 minutes
 - Checks safety limits before rebooting
-- Logs all actions to central server
 - Implements rate limiting and pause mechanism
 
 Design:
 - Runs independently from camera agent (separate systemd service)
 - Uses shared camera agent modules (logger.py, api_client.py, config.py)
-- Executes as root to enable system reboot
+- Executes reboot via systemctl (pi user with CAP_SYS_BOOT)
 - Monitors single camera (one instance per camera Pi)
 
 Safety Mechanisms:
 - 5-minute cooldown between reboots
 - 5 reboots/hour limit triggers 24-hour pause
 - Skips reboot if camera is streaming
+- Skips reboot if camera agent is not running (deploy/maintenance)
 - Manual disable via flag file
 - Comprehensive logging of all decisions
 """
@@ -28,7 +29,6 @@ Safety Mechanisms:
 import sys
 import time
 import json
-import re
 import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -42,6 +42,7 @@ sys.path.insert(0, str(CAMERA_AGENT_DIR))
 from logger import EnhancedLogger, log
 from api_client import APIClient
 from config import config
+from local_health import read_local_health_status, parse_noframes_duration, noframes_minutes_from_issues
 
 
 class RebootHistory:
@@ -167,40 +168,75 @@ class RebootHistory:
         return max(self.reboots)
 
 
-class CameraHealthChecker:
+class LocalHealthChecker:
+    """Read capture health from local status file written by system_watchdog."""
+
+    def __init__(self, status_path: str, max_age_seconds: int):
+        self.status_path = status_path
+        self.max_age_seconds = max_age_seconds
+
+    def check(self) -> Dict:
+        raw = read_local_health_status(self.status_path, self.max_age_seconds)
+
+        if raw.get('available'):
+            issues = raw.get('issues', [])
+            noframes_minutes = raw.get('noframes_minutes', 0)
+            if noframes_minutes == 0 and issues:
+                noframes_minutes = noframes_minutes_from_issues(issues)
+
+            has_noframes = noframes_minutes > 0 or any('NoFrames:' in i for i in issues)
+            return {
+                'available': True,
+                'healthy': not has_noframes,
+                'noframes_minutes': noframes_minutes,
+                'issues': issues,
+                'updated_at': raw.get('updated_at'),
+            }
+
+        if raw.get('stale'):
+            issues = raw.get('issues', [])
+            noframes_minutes = raw.get('noframes_minutes', 0)
+            if noframes_minutes == 0 and issues:
+                noframes_minutes = noframes_minutes_from_issues(issues)
+            has_noframes = noframes_minutes > 0 or any('NoFrames:' in i for i in issues)
+            return {
+                'available': False,
+                'stale': True,
+                'healthy': not has_noframes if has_noframes else None,
+                'noframes_minutes': noframes_minutes,
+                'issues': issues,
+                'error': f"local health file stale ({int(raw.get('age_seconds', 0))}s old)",
+            }
+
+        return {
+            'available': False,
+            'missing': raw.get('missing', False),
+            'healthy': None,
+            'noframes_minutes': 0,
+            'error': raw.get('error', 'local health file missing'),
+        }
+
+
+class CentralHealthChecker:
     """
-    Check camera health by querying central server logs.
-    
-    Looks for NoFrames errors and parses duration to determine if camera is hung.
+    Optional central server health check for fleet visibility.
+
+    Failures do NOT imply the camera is healthy — local check is authoritative.
     """
-    
+
     def __init__(self, api_client: APIClient, camera_id: str):
-        """
-        Initialize health checker.
-        
-        Args:
-            api_client: API client for central server
-            camera_id: Camera identifier
-        """
         self.api_client = api_client
         self.camera_id = camera_id
-    
-    def check_health(self) -> Dict:
+
+    def check(self) -> Dict:
         """
-        Check camera health by querying recent error logs.
-        
-        Returns:
-            Dict with keys:
-                - healthy: bool (True if camera OK, False if hung)
-                - noframes_minutes: int (duration of NoFrames, 0 if healthy)
-                - last_error_message: str (most recent error, or None)
-                - error: str (error message if check failed)
+        Query central server for recent NoFrames errors.
+
+        Returns dict with noframes_minutes and error on failure (never assumes healthy).
         """
         try:
-            # Query last hour of ERROR logs from this camera
-            # IMPORTANT: Use local time, not UTC, to match central server timezone
             one_hour_ago = datetime.now() - timedelta(hours=1)
-            
+
             response = self.api_client.session.get(
                 f"{self.api_client.base_url}/logs",
                 params={
@@ -210,82 +246,144 @@ class CameraHealthChecker:
                     "limit": 100
                 }
             )
-            
+
             if response.status_code != 200:
                 return {
-                    'healthy': True,  # Assume healthy if can't check
+                    'available': False,
                     'noframes_minutes': 0,
-                    'last_error_message': None,
                     'error': f"API returned {response.status_code}"
                 }
-            
-            data = response.json()
-            logs = data.get('logs', [])
-            
-            if not logs:
-                # No errors in last hour - camera is healthy
-                return {
-                    'healthy': True,
-                    'noframes_minutes': 0,
-                    'last_error_message': None,
-                    'error': None
-                }
-            
-            # Look for most recent NoFrames error
+
+            logs = response.json().get('logs', [])
+
             for log_entry in logs:
                 message = log_entry.get('message', '')
-                
-                # Check for NoFrames in watchdog messages
                 if 'NoFrames:' in message:
-                    # Parse duration: "NoFrames:65m" or "NoFrames:1h30m" or "NoFrames:2d5h15m"
-                    duration_minutes = self._parse_noframes_duration(message)
-                    
                     return {
+                        'available': True,
                         'healthy': False,
-                        'noframes_minutes': duration_minutes,
+                        'noframes_minutes': parse_noframes_duration(message),
                         'last_error_message': message,
                         'error': None
                     }
-            
-            # Errors exist but no NoFrames - camera is healthy
+
             return {
+                'available': True,
                 'healthy': True,
                 'noframes_minutes': 0,
-                'last_error_message': logs[0].get('message'),
+                'last_error_message': logs[0].get('message') if logs else None,
                 'error': None
             }
-            
+
         except Exception as e:
-            log(f"[WATCHDOG REBOOT] Error checking camera health: {e}", level="ERROR")
             return {
-                'healthy': True,  # Assume healthy on error
+                'available': False,
                 'noframes_minutes': 0,
-                'last_error_message': None,
                 'error': str(e)
             }
-    
-    def _parse_noframes_duration(self, message: str) -> int:
-        """
-        Parse NoFrames duration from log message.
-        
-        Args:
-            message: Log message containing "NoFrames:Xm" or "NoFrames:XhYm" etc.
-        
-        Returns:
-            Duration in minutes
-        """
-        # Match patterns: "65m", "1h30m", "2d5h15m"
-        match = re.search(r'NoFrames:(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?', message)
-        
-        if not match:
-            return 0
-        
-        days = int(match.group(1) or 0)
-        hours = int(match.group(2) or 0)
-        minutes = int(match.group(3) or 0)
-        
-        total_minutes = (days * 24 * 60) + (hours * 60) + minutes
-        return total_minutes
+
+
+class HealthChecker:
+    """
+    Local-first health checker for reboot decisions.
+
+    Primary: local_health.json from system_watchdog
+    Secondary: central server API (optional enrichment only)
+    """
+
+    AGENT_SERVICE = 'security-camera-agent.service'
+
+    def __init__(self, local_checker: LocalHealthChecker, central_checker: CentralHealthChecker):
+        self.local_checker = local_checker
+        self.central_checker = central_checker
+
+    def _is_agent_running(self) -> bool:
+        try:
+            result = subprocess.run(
+                ['systemctl', 'is-active', '--quiet', self.AGENT_SERVICE],
+                capture_output=True,
+                timeout=5,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def check_health(self) -> Dict:
+        local = self.local_checker.check()
+        central = self.central_checker.check()
+        central_error = central.get('error')
+        sources = []
+
+        if config.REBOOT_WATCHDOG_LOCAL_CHECK and local.get('available'):
+            noframes_minutes = local['noframes_minutes']
+            healthy = local['healthy']
+            sources.append('local')
+            if central_error:
+                log(
+                    f"[WATCHDOG REBOOT] Central API unreachable ({central_error}) — "
+                    f"using local health (NoFrames: {noframes_minutes}m)",
+                    level="WARNING"
+                )
+        elif config.REBOOT_WATCHDOG_LOCAL_CHECK:
+            if not self._is_agent_running():
+                return {
+                    'skip_reboot': True,
+                    'reason': 'agent not running (deploy/maintenance)',
+                    'healthy': True,
+                    'noframes_minutes': 0,
+                    'sources': [],
+                    'central_error': central_error,
+                }
+
+            if local.get('stale') and local.get('healthy') is False:
+                noframes_minutes = local['noframes_minutes']
+                healthy = local.get('healthy', False)
+                sources.append('local-stale')
+                log(
+                    f"[WATCHDOG REBOOT] Local health file stale — "
+                    f"using last known NoFrames: {noframes_minutes}m",
+                    level="WARNING"
+                )
+            elif not central.get('error'):
+                noframes_minutes = central['noframes_minutes']
+                healthy = central['healthy']
+                sources.append('central')
+                log("[WATCHDOG REBOOT] Local health unavailable — using central API", level="WARNING")
+            else:
+                log(
+                    f"[WATCHDOG REBOOT] No health data (local: {local.get('error')}, "
+                    f"central: {central_error}) — skipping reboot check",
+                    level="WARNING"
+                )
+                return {
+                    'skip_reboot': True,
+                    'reason': 'no health data available',
+                    'healthy': True,
+                    'noframes_minutes': 0,
+                    'sources': [],
+                    'central_error': central_error,
+                }
+        else:
+            if central.get('error'):
+                log(f"[WATCHDOG REBOOT] Central API error: {central_error}", level="WARNING")
+                return {
+                    'skip_reboot': True,
+                    'reason': 'central API unavailable',
+                    'healthy': True,
+                    'noframes_minutes': 0,
+                    'sources': [],
+                    'central_error': central_error,
+                }
+            noframes_minutes = central['noframes_minutes']
+            healthy = central['healthy']
+            sources.append('central')
+
+        return {
+            'healthy': healthy,
+            'noframes_minutes': noframes_minutes,
+            'sources': sources,
+            'central_error': central_error,
+        }
 
 
 class StreamingChecker:
@@ -345,7 +443,13 @@ class RebootWatchdog:
         
         # Initialize components
         self.history = RebootHistory(config.REBOOT_WATCHDOG_HISTORY_FILE)
-        self.health_checker = CameraHealthChecker(self.api_client, self.camera_id)
+        self.health_checker = HealthChecker(
+            LocalHealthChecker(
+                config.LOCAL_HEALTH_STATUS_FILE,
+                config.LOCAL_HEALTH_MAX_AGE_SECONDS,
+            ),
+            CentralHealthChecker(self.api_client, self.camera_id),
+        )
         self.streaming_checker = StreamingChecker(config.CAMERA_CONTROL_API_BASE)
         
         log(f"[WATCHDOG REBOOT] Watchdog service initialized for {self.camera_id}", level="INFO")
@@ -368,7 +472,8 @@ class RebootWatchdog:
         log(f"[WATCHDOG REBOOT] Starting watchdog service", level="INFO")
         log(f"[WATCHDOG REBOOT] Configuration: hang_threshold={config.REBOOT_WATCHDOG_HANG_THRESHOLD}m, "
             f"check_interval={config.REBOOT_WATCHDOG_CHECK_INTERVAL}s, "
-            f"cooldown={config.REBOOT_WATCHDOG_COOLDOWN}s", level="INFO")
+            f"cooldown={config.REBOOT_WATCHDOG_COOLDOWN}s, "
+            f"local_check={config.REBOOT_WATCHDOG_LOCAL_CHECK}", level="INFO")
         
         while True:
             try:
@@ -407,29 +512,32 @@ class RebootWatchdog:
                 log(f"[WATCHDOG REBOOT] Reboot watchdog paused", level="WARNING")
             return
         
-        # Check camera health
+        # Check camera health (local-first)
         health = self.health_checker.check_health()
-        
-        if health.get('error'):
-            log(f"[WATCHDOG REBOOT] Health check error: {health['error']}", level="WARNING")
+
+        if health.get('skip_reboot'):
+            log(f"[WATCHDOG REBOOT] Skipping reboot check: {health.get('reason')}", level="INFO")
             return
-        
+
         noframes_minutes = health['noframes_minutes']
+        source = ', '.join(health.get('sources', [])) or 'unknown'
         
         # Camera is healthy
         if health['healthy']:
-            log(f"[WATCHDOG REBOOT] Camera is healthy, no reboot needed (NoFrames: {noframes_minutes}m)", 
+            log(f"[WATCHDOG REBOOT] Camera is healthy, no reboot needed "
+                f"(NoFrames: {noframes_minutes}m, source: {source})",
                 level="INFO")
             return
-        
+
         # Camera is struggling but not yet at threshold
         if noframes_minutes < config.REBOOT_WATCHDOG_HANG_THRESHOLD:
             log(f"[WATCHDOG REBOOT] Camera struggling (NoFrames: {noframes_minutes}m, "
-                f"threshold: {config.REBOOT_WATCHDOG_HANG_THRESHOLD}m)", level="WARNING")
+                f"threshold: {config.REBOOT_WATCHDOG_HANG_THRESHOLD}m, source: {source})",
+                level="WARNING")
             return
-        
+
         # Camera is hung - proceed to reboot decision
-        log(f"[WATCHDOG REBOOT] Camera is UNHEALTHY (NoFrames: {noframes_minutes}m) - "
+        log(f"[WATCHDOG REBOOT] Camera is UNHEALTHY (NoFrames: {noframes_minutes}m, source: {source}) - "
             f"evaluating reboot decision", level="ERROR")
         
         # Safety Check #1: Is camera streaming?

@@ -82,6 +82,7 @@ class Config:
         # Local temporary directories
         self.TMP_PATH = os.path.join(self.BASE_PATH, "tmp")
         self.PENDING_DIR = os.path.join(self.TMP_PATH, "pending")  # Staging for transfer
+        self.VAR_PATH = os.path.join(self.BASE_PATH, "var")
         
         # NFS subdirectories (on mounted filesystem, managed by central server)
         # These are NOT created by ensure_directories() - they exist on NFS
@@ -206,9 +207,14 @@ class Config:
         # Feature flags
         self.REBOOT_WATCHDOG_ENABLED = True                     # Master on/off switch
         self.REBOOT_WATCHDOG_CHECK_STREAMING = True             # Skip reboot if streaming
+        self.REBOOT_WATCHDOG_LOCAL_CHECK = True                 # Local-first health (no central API required)
+        
+        # Local health status (written by system_watchdog, read by reboot watchdog)
+        self.LOCAL_HEALTH_STATUS_FILE = os.path.join(self.VAR_PATH, "local_health.json")
+        self.LOCAL_HEALTH_MAX_AGE_SECONDS = 180                 # Stale after 3 min (quick check every ~60s)
         
         # Tracking files
-        self.REBOOT_WATCHDOG_HISTORY_FILE = '/var/tmp/camera-reboot-history.json'
+        self.REBOOT_WATCHDOG_HISTORY_FILE = os.path.join(self.VAR_PATH, "camera-reboot-history.json")
         self.REBOOT_WATCHDOG_DISABLE_FLAG = '/var/tmp/disable-auto-reboot'
         
         # Camera Control API endpoint (local)
@@ -499,6 +505,7 @@ def ensure_directories():
     local_dirs = [
         config.TMP_PATH,
         config.PENDING_DIR,
+        config.VAR_PATH,
     ]
     
     for directory in local_dirs:

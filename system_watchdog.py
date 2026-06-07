@@ -19,6 +19,7 @@ import os
 from datetime import datetime, timedelta
 from logger import log
 from config import config
+from local_health import write_local_health_status
 
 
 class SystemWatchdog:
@@ -170,6 +171,38 @@ class SystemWatchdog:
                 f"Disk:{hardware_status['disk_free_gb']:.0f}GB | "
                 f"Mem:{hardware_status['memory_percent']}%", 
                 level="INFO")
+
+        self._write_local_health_status(issues, thread_status)
+    
+    def _write_local_health_status(self, issues, thread_status):
+        """Write local health JSON for reboot watchdog (local-first hang detection)."""
+        cb_health = self.circular_buffer.get_health()
+        last_frame_time = cb_health.get('last_frame_time')
+        noframes_seconds = 0
+        if last_frame_time:
+            noframes_seconds = max(0, int(time.time() - last_frame_time))
+
+        alive_threads = sum(1 for t in thread_status.values() if t['alive'])
+        total_threads = len(thread_status)
+
+        status = {
+            'updated_at': datetime.now().isoformat(),
+            'updated_at_unix': time.time(),
+            'camera_id': config.CAMERA_ID,
+            'healthy': len(issues) == 0,
+            'issues': issues,
+            'noframes_seconds': noframes_seconds,
+            'noframes_minutes': noframes_seconds // 60,
+            'last_frame_time': last_frame_time,
+            'frame_count': cb_health.get('frame_count', 0),
+            'threads_alive': alive_threads,
+            'threads_total': total_threads,
+        }
+
+        try:
+            write_local_health_status(config.LOCAL_HEALTH_STATUS_FILE, status)
+        except Exception as e:
+            log(f"Watchdog: Failed to write local health status: {e}", level="WARNING")
     
     def _detailed_health_report(self):
         """
