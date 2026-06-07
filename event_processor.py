@@ -285,8 +285,8 @@ class EventProcessor:
             image_a_filename = f"{event_id}_{timestamp_str}_a.jpg"
             image_a_path = self.pending_dir / image_a_filename
             
-            log(f"Event {event_id}: Capturing Picture A...", level="INFO")
-            self.buffer.capture_color_still(str(image_a_path))
+            log(f"Event {event_id}: Saving Picture A from buffer...", level="INFO")
+            self.buffer.save_event_still(str(image_a_path))
             log(f"Event {event_id}: Picture A saved: {image_a_filename}", level="INFO")
             
             # Create sentinel file (signals ready for transfer)
@@ -344,8 +344,8 @@ class EventProcessor:
             image_b_filename = f"{event_id}_{timestamp_str}_b.jpg"
             image_b_path = self.pending_dir / image_b_filename
             
-            log(f"Event {event_id}: Capturing Picture B...", level="INFO")
-            self.buffer.capture_color_still(str(image_b_path))
+            log(f"Event {event_id}: Saving Picture B from buffer...", level="INFO")
+            self.buffer.save_event_still(str(image_b_path))
             log(f"Event {event_id}: Picture B saved: {image_b_filename}", level="INFO")
             
             # Create sentinel file

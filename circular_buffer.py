@@ -686,6 +686,55 @@ class CircularBuffer:
             # Return small copies (total ~45KB vs 5.4MB before)
             return (prev_small.copy(), curr_small.copy())
     
+    def save_buffered_still(self, filepath):
+        """
+        Save the latest picture-buffer frame as JPEG without calling picam2.
+
+        Thread-safe. Used for event Picture A/B to avoid concurrent camera access.
+        """
+        from PIL import Image
+        import gc
+        import cv2
+        import numpy as np
+
+        img = None
+        try:
+            with self.frame_lock:
+                if self.current_frame is None:
+                    raise RuntimeError("No frame available in picture buffer")
+                frame_copy = self.current_frame.copy()
+
+            if len(frame_copy.shape) == 2:
+                frame_copy = cv2.cvtColor(frame_copy, cv2.COLOR_GRAY2RGB)
+            elif frame_copy.shape[2] == 4:
+                frame_copy = frame_copy[:, :, :3]
+
+            if frame_copy.dtype != np.uint8:
+                frame_copy = frame_copy.astype(np.uint8)
+
+            img = Image.fromarray(frame_copy, mode="RGB")
+            img.save(filepath, "JPEG", quality=int(config.JPEG_QUALITY))
+            log(f"Saved buffered still: {filepath}")
+        except Exception as e:
+            log(f"Error saving buffered still {filepath}: {e}", level="ERROR")
+            raise
+        finally:
+            if img is not None:
+                img.close()
+            gc.collect()
+
+    def save_event_still(self, filepath):
+        """
+        Save an event still (Picture A or B).
+
+        Uses the picture buffer by default; falls back to capture_color_still()
+        when USE_BUFFERED_EVENT_STILLS is False.
+        """
+        if config.USE_BUFFERED_EVENT_STILLS:
+            self.save_buffered_still(filepath)
+        else:
+            self.capture_color_still(filepath)
+
     def save_current_frame_as_image(self, filepath, force_color=True):
         """
         Save current frame as high-resolution JPEG (color if requested).

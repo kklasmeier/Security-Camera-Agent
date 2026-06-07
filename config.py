@@ -165,6 +165,11 @@ class Config:
         # These frames are used for both motion comparison AND saving as Picture A/B
         self.PICTURE_CAPTURE_INTERVAL = 0.5
         
+        # Event stills (Picture A/B): save from picture buffer instead of picam2 still capture.
+        # Avoids concurrent capture_file/capture_array during H264 encoding (stability).
+        # Set False to revert to ISP JPEG via capture_color_still().
+        self.USE_BUFFERED_EVENT_STILLS = True
+        
         # JPEG quality for saved images (1-100)
         self.JPEG_QUALITY = 80
         
