@@ -14,7 +14,7 @@ This service runs as pi with CAP_SYS_BOOT (separate from camera agent) and:
 Design:
 - Runs independently from camera agent (separate systemd service)
 - Uses shared camera agent modules (logger.py, api_client.py, config.py)
-- Executes reboot via systemctl (pi user with CAP_SYS_BOOT)
+- Executes reboot via /sbin/reboot (pi user with CAP_SYS_BOOT)
 - Monitors single camera (one instance per camera Pi)
 
 Safety Mechanisms:
@@ -594,7 +594,7 @@ class RebootWatchdog:
         log(f"[WATCHDOG REBOOT] Executing system reboot NOW", level="ERROR")
         
         try:
-            subprocess.run(['systemctl', 'reboot'], check=True)
+            subprocess.run(['/sbin/reboot'], check=True)
         except Exception as e:
             log(f"[WATCHDOG REBOOT] FAILED to execute reboot: {e}", level="ERROR")
 
