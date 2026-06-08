@@ -179,8 +179,9 @@ class Config:
         self.LORES_RESOLUTION = (640, 480)
 
         # Encode-only soak experiment: continuous H264 encode, no capture_array/motion/events.
-        # Enable per-camera via config_local.py (Study only during soak test).
-        self.ENCODE_ONLY_SOAK = False
+        # Fleet-wide soak to compare encode stability vs prior lores/capture hangs.
+        # Set False in config_local.py to revert a single node to full pipeline.
+        self.ENCODE_ONLY_SOAK = True
         self.ENCODE_STALE_THRESHOLD_SECONDS = 120
         
         # JPEG quality for saved images (1-100)
@@ -344,7 +345,7 @@ class Config:
         self.STREAM_MAX_DURATION_SECONDS = 1800 # Maximum stream duration (30 minutes)
 
         # System version (semantic versioning)
-        self.SYSTEM_VERSION = "1.1.26"
+        self.SYSTEM_VERSION = "1.1.27"
 
         # Note: PICTURE_CAPTURE_INTERVAL remains at 0.5s as default
         # When streaming starts, it's changed to STREAMING_CAPTURE_INTERVAL
