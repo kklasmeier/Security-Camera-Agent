@@ -37,6 +37,39 @@ def noframes_minutes_from_issues(issues: List[str]) -> int:
     return 0
 
 
+def parse_noencode_duration(message: str) -> int:
+    """Parse NoEncode duration from issue string (same format as NoFrames)."""
+    match = re.search(r'NoEncode:(?:(\d+)d)?(?:(\d+)h)?(?:(\d+)m)?', message)
+    if not match:
+        return 0
+
+    days = int(match.group(1) or 0)
+    hours = int(match.group(2) or 0)
+    minutes = int(match.group(3) or 0)
+    return (days * 24 * 60) + (hours * 60) + minutes
+
+
+def noencode_minutes_from_issues(issues: List[str]) -> int:
+    """Extract NoEncode duration in minutes from issue strings."""
+    for issue in issues:
+        if 'NoEncode:' in issue:
+            return parse_noencode_duration(issue)
+    return 0
+
+
+def hang_minutes_from_health(raw: Dict[str, Any]) -> int:
+    """Return hang duration in minutes (NoEncode for soak, NoFrames otherwise)."""
+    if raw.get('encode_only_soak'):
+        minutes = raw.get('encode_stale_minutes', 0)
+        if minutes == 0:
+            minutes = noencode_minutes_from_issues(raw.get('issues', []))
+        return minutes
+    minutes = raw.get('noframes_minutes', 0)
+    if minutes == 0:
+        minutes = noframes_minutes_from_issues(raw.get('issues', []))
+    return minutes
+
+
 def write_local_health_status(path: str, status: Dict[str, Any]) -> None:
     """Atomically write local health status JSON."""
     file_path = Path(path)

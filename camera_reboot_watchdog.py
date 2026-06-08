@@ -42,7 +42,7 @@ sys.path.insert(0, str(CAMERA_AGENT_DIR))
 from logger import EnhancedLogger, log
 from api_client import APIClient
 from config import config
-from local_health import read_local_health_status, parse_noframes_duration, noframes_minutes_from_issues
+from local_health import read_local_health_status, parse_noframes_duration, noframes_minutes_from_issues, hang_minutes_from_health
 
 
 class RebootHistory:
@@ -180,30 +180,35 @@ class LocalHealthChecker:
 
         if raw.get('available'):
             issues = raw.get('issues', [])
-            noframes_minutes = raw.get('noframes_minutes', 0)
-            if noframes_minutes == 0 and issues:
-                noframes_minutes = noframes_minutes_from_issues(issues)
-
-            has_noframes = noframes_minutes > 0 or any('NoFrames:' in i for i in issues)
+            hang_minutes = hang_minutes_from_health(raw)
+            encode_only = raw.get('encode_only_soak', False)
+            if encode_only:
+                has_hang = hang_minutes > 0 or any('NoEncode:' in i for i in issues)
+            else:
+                has_hang = hang_minutes > 0 or any('NoFrames:' in i for i in issues)
             return {
                 'available': True,
-                'healthy': not has_noframes,
-                'noframes_minutes': noframes_minutes,
+                'healthy': not has_hang,
+                'noframes_minutes': hang_minutes,
+                'encode_only_soak': encode_only,
                 'issues': issues,
                 'updated_at': raw.get('updated_at'),
             }
 
         if raw.get('stale'):
             issues = raw.get('issues', [])
-            noframes_minutes = raw.get('noframes_minutes', 0)
-            if noframes_minutes == 0 and issues:
-                noframes_minutes = noframes_minutes_from_issues(issues)
-            has_noframes = noframes_minutes > 0 or any('NoFrames:' in i for i in issues)
+            hang_minutes = hang_minutes_from_health(raw)
+            encode_only = raw.get('encode_only_soak', False)
+            if encode_only:
+                has_hang = hang_minutes > 0 or any('NoEncode:' in i for i in issues)
+            else:
+                has_hang = hang_minutes > 0 or any('NoFrames:' in i for i in issues)
             return {
                 'available': False,
                 'stale': True,
-                'healthy': not has_noframes if has_noframes else None,
-                'noframes_minutes': noframes_minutes,
+                'healthy': not has_hang if has_hang else None,
+                'noframes_minutes': hang_minutes,
+                'encode_only_soak': encode_only,
                 'issues': issues,
                 'error': f"local health file stale ({int(raw.get('age_seconds', 0))}s old)",
             }

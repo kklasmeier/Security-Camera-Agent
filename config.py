@@ -169,6 +169,19 @@ class Config:
         # Avoids concurrent capture_file/capture_array during H264 encoding (stability).
         # Set False to revert to ISP JPEG via capture_color_still().
         self.USE_BUFFERED_EVENT_STILLS = True
+
+        # Motion/stills: capture from lores stream instead of main while H264 encodes main.
+        # Main stream is encode-only; picture buffer is fed from lores (converted to RGB).
+        # Set False to revert to capture_array() on main (legacy dual-use path).
+        self.USE_LORES_CAPTURE = True
+
+        # Lores stream size for USE_LORES_CAPTURE (width, height). Must be <= main resolution.
+        self.LORES_RESOLUTION = (640, 480)
+
+        # Encode-only soak experiment: continuous H264 encode, no capture_array/motion/events.
+        # Enable per-camera via config_local.py (Study only during soak test).
+        self.ENCODE_ONLY_SOAK = False
+        self.ENCODE_STALE_THRESHOLD_SECONDS = 120
         
         # JPEG quality for saved images (1-100)
         self.JPEG_QUALITY = 80

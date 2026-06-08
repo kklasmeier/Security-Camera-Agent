@@ -27,7 +27,7 @@
 
 AGENT_SERVICE="security-camera-agent"
 WATCHDOG_SERVICE="camera-reboot-watchdog"
-WATCHDOG_HISTORY_FILE="/var/tmp/camera-reboot-history.json"
+WATCHDOG_HISTORY_FILE="/home/pi/Security-Camera-Agent/var/camera-reboot-history.json"
 
 # =====================================================================
 # HELP SCREEN
@@ -183,7 +183,7 @@ import json
 from datetime import datetime
 
 try:
-    with open("/var/tmp/camera-reboot-history.json") as f:
+    with open("/home/pi/Security-Camera-Agent/var/camera-reboot-history.json") as f:
         data = json.load(f)
 
     print("Formatted History:")

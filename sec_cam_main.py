@@ -23,6 +23,7 @@ import sys
 import signal
 import time
 from config import (
+    config,
     ensure_directories,
     validate_config,
     print_config
@@ -158,40 +159,52 @@ class SecurityCameraSystem:
             log("="*60, level="INFO")
             log("✓ API Client: Initialized and registered", level="INFO")
             log("✓ Circular Buffer: Ready", level="INFO")
-            log("✓ Motion Detector: ACTIVE (Session 1B-4)", level="INFO")
-            log("✓ Event Processor: ACTIVE (Session 1B-5)", level="INFO")
+            if config.ENCODE_ONLY_SOAK:
+                log("✓ Motion Detector: DISABLED (encode-only soak)", level="INFO")
+                log("✓ Event Processor: DISABLED (encode-only soak)", level="INFO")
+            else:
+                log("✓ Motion Detector: ACTIVE (Session 1B-4)", level="INFO")
+                log("✓ Event Processor: ACTIVE (Session 1B-5)", level="INFO")
             log("✓ Transfer Manager: ACTIVE (Session 1B-7)", level="INFO")
             log("✓ MJPEG Server: ACTIVE (Session 8.5)", level="INFO")
             log("="*60, level="INFO")
             log("", level="INFO")
             log("System Status:", level="INFO")
             log("- Camera registration: ACTIVE", level="INFO")
-            log("- Video capture: ACTIVE", level="INFO")
-            log("- Motion detection: ACTIVE (Session 1B-4)", level="INFO")
-            log("- Event processing: ACTIVE (Session 1B-5)", level="INFO")
+            if config.ENCODE_ONLY_SOAK:
+                log("- Video capture: ENCODE-ONLY SOAK (H264 buffer only)", level="INFO")
+                log("- Motion detection: DISABLED", level="INFO")
+                log("- Event processing: DISABLED", level="INFO")
+            else:
+                log("- Video capture: ACTIVE", level="INFO")
+                log("- Motion detection: ACTIVE (Session 1B-4)", level="INFO")
+                log("- Event processing: ACTIVE (Session 1B-5)", level="INFO")
             log("- File transfers: ACTIVE (Session 1B-7)", level="INFO")
             log("="*60, level="INFO")
             
-            # Session 1B-4: Initialize motion detector with api_client
-            log("Initializing motion detector...")
-            self.motion_detector = MotionDetector(
-                self.circular_buffer,
-                self.motion_event,
-                self.api_client  # NEW: api_client instead of database
-            )
-            log("✓ Motion detector initialized", level="INFO")
-            
-            # Link motion detector to circular buffer for streaming control
-            self.circular_buffer.set_motion_detector(self.motion_detector)
-            
-            # Session 1B-5: Initialize event processor with api_client
-            log("Initializing event processor...")
-            self.event_processor = EventProcessor(
-                self.circular_buffer,
-                self.motion_event,
-                self.api_client  # NEW: Add api_client for status updates
-            )
-            log("✓ Event processor initialized", level="INFO")
+            # Session 1B-4: Initialize motion detector with api_client (skipped in encode-only soak)
+            if config.ENCODE_ONLY_SOAK:
+                log("Encode-only soak: skipping motion detector and event processor", level="INFO")
+                self.motion_detector = None
+                self.event_processor = None
+            else:
+                log("Initializing motion detector...")
+                self.motion_detector = MotionDetector(
+                    self.circular_buffer,
+                    self.motion_event,
+                    self.api_client
+                )
+                log("✓ Motion detector initialized", level="INFO")
+                
+                self.circular_buffer.set_motion_detector(self.motion_detector)
+                
+                log("Initializing event processor...")
+                self.event_processor = EventProcessor(
+                    self.circular_buffer,
+                    self.motion_event,
+                    self.api_client
+                )
+                log("✓ Event processor initialized", level="INFO")
             
             # Session 1B-7: Initialize transfer manager
             log("Initializing transfer manager...")
@@ -268,23 +281,28 @@ class SecurityCameraSystem:
             # Session 1B-4: Start Motion Detector
             # ================================================================
             
-            # Session 1B-4: Start motion detector
-            log("Starting motion detector...")
-            if not self.motion_detector:
-                log("Motion detector not initialized; aborting startup", level="ERROR")
-                print("\n✗ Startup failed: motion detector is not initialized\n")
-                return False
-            self.motion_detector.start()
-            log("✓ Motion detector started", level="INFO")
+            # Session 1B-4: Start motion detector (skipped in encode-only soak)
+            if config.ENCODE_ONLY_SOAK:
+                log("Encode-only soak: motion detector not started", level="INFO")
+            else:
+                log("Starting motion detector...")
+                if not self.motion_detector:
+                    log("Motion detector not initialized; aborting startup", level="ERROR")
+                    print("\n✗ Startup failed: motion detector is not initialized\n")
+                    return False
+                self.motion_detector.start()
+                log("✓ Motion detector started", level="INFO")
             
-            # Session 1B-5: Start event processor
-            log("Starting event processor...")
-            if not self.event_processor:
-                log("Event processor not initialized; aborting startup", level="ERROR")
-                print("\n✗ Startup failed: event processor is not initialized\n")
-                return False
-            self.event_processor.start()
-            log("✓ Event processor started", level="INFO")
+            if config.ENCODE_ONLY_SOAK:
+                log("Encode-only soak: event processor not started", level="INFO")
+            else:
+                log("Starting event processor...")
+                if not self.event_processor:
+                    log("Event processor not initialized; aborting startup", level="ERROR")
+                    print("\n✗ Startup failed: event processor is not initialized\n")
+                    return False
+                self.event_processor.start()
+                log("✓ Event processor started", level="INFO")
             
             # Session 1B-7: Start transfer manager
             log("Starting transfer manager...")
@@ -316,15 +334,24 @@ class SecurityCameraSystem:
             log("="*60, level="INFO")
             log("Active Components:", level="INFO")
             log("  ✓ API Client (registered with central server)", level="INFO")
-            log("  ✓ Circular Buffer (capturing video)", level="INFO")
-            log("  ✓ Motion Detector (creating events on central server)", level="INFO")
-            log("  ✓ Event Processor (saving files to pending directory)", level="INFO")
-            log("  ✓ Transfer Manager (transferring files to NFS)", level="INFO")
+            if config.ENCODE_ONLY_SOAK:
+                log("  ✓ Circular Buffer (encode-only soak — H264 buffer only)", level="INFO")
+                log("  ✓ Transfer Manager (transferring files to NFS)", level="INFO")
+                log("  ○ Motion Detector (disabled for soak)", level="INFO")
+                log("  ○ Event Processor (disabled for soak)", level="INFO")
+            else:
+                log("  ✓ Circular Buffer (capturing video)", level="INFO")
+                log("  ✓ Motion Detector (creating events on central server)", level="INFO")
+                log("  ✓ Event Processor (saving files to pending directory)", level="INFO")
+                log("  ✓ Transfer Manager (transferring files to NFS)", level="INFO")
             log("", level="INFO")
-            log("Inactive Components (pending migration):", level="WARNING")
-            log("  ⚠ MJPEG Server (Future session)", level="WARNING")
-            log("", level="INFO")
-            log("NOTE: Full pipeline active → Motion detected → Events created → Files saved → Transferred to NFS", level="INFO")
+            if not config.ENCODE_ONLY_SOAK:
+                log("Inactive Components (pending migration):", level="WARNING")
+                log("  ⚠ MJPEG Server (Future session)", level="WARNING")
+                log("", level="INFO")
+                log("NOTE: Full pipeline active → Motion detected → Events created → Files saved → Transferred to NFS", level="INFO")
+            else:
+                log("NOTE: Encode-only soak — monitor H264 buffer chunk advancement in Grafana", level="INFO")
             log("", level="INFO")
             log("Press Ctrl+C to stop", level="INFO")
             log("="*60, level="INFO")
@@ -332,8 +359,11 @@ class SecurityCameraSystem:
             print("\n" + "="*60)
             print("✓ Security Camera System Running")
             print("="*60)
-            print("Active: Camera, Motion Detection, Event Processing, File Transfers")
-            print("✓ Files automatically transferred to NFS")
+            if config.ENCODE_ONLY_SOAK:
+                print("Active: Encode-only soak (H264 buffer), File Transfers")
+            else:
+                print("Active: Camera, Motion Detection, Event Processing, File Transfers")
+                print("✓ Files automatically transferred to NFS")
             print("Press Ctrl+C to stop")
             print("="*60 + "\n")
             

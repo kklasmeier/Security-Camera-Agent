@@ -338,7 +338,7 @@ class CameraControlAPI:
                     # ================================
                     
                     # ===== CHECK AND ABORT EVENT PROCESSING =====
-                    if self.event_processor.is_processing():
+                    if self.event_processor and self.event_processor.is_processing():
                         log("API: Event processing in progress - initiating abort")
                         
                         # Request abort and wait for completion

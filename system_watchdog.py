@@ -59,6 +59,7 @@ class SystemWatchdog:
         self.event_processor = event_processor
         self.transfer_manager = transfer_manager
         self.api_client = api_client
+        self.encode_only_soak = config.ENCODE_ONLY_SOAK
         
         # Watchdog control
         self.running = False
@@ -163,24 +164,36 @@ class SystemWatchdog:
         if issues:
             log(f"Watchdog: ⚠ ISSUES DETECTED: {', '.join(issues)}", level="ERROR")
         else:
-            # Calculate activity rates
-            motion_rate = self.motion_detector.check_count - self.last_motion_checks
-            
-            log(f"Watchdog: ✓ All healthy | T:{alive_threads}/{total_threads} | "
-                f"Checks:{motion_rate}/60s | "
-                f"Disk:{hardware_status['disk_free_gb']:.0f}GB | "
-                f"Mem:{hardware_status['memory_percent']}%", 
-                level="INFO")
+            if self.encode_only_soak:
+                cb_health = self.circular_buffer.get_health()
+                encode_chunks = cb_health.get('encode_chunks', 0)
+                encode_stale = cb_health.get('encode_stale_seconds', 0)
+                log(f"Watchdog: ✓ All healthy | T:{alive_threads}/{total_threads} | "
+                    f"Encode:{encode_chunks}chunks/{encode_stale:.0f}s_stale | "
+                    f"Disk:{hardware_status['disk_free_gb']:.0f}GB | "
+                    f"Mem:{hardware_status['memory_percent']}%",
+                    level="INFO")
+            else:
+                motion_rate = self.motion_detector.check_count - self.last_motion_checks
+                log(f"Watchdog: ✓ All healthy | T:{alive_threads}/{total_threads} | "
+                    f"Checks:{motion_rate}/60s | "
+                    f"Disk:{hardware_status['disk_free_gb']:.0f}GB | "
+                    f"Mem:{hardware_status['memory_percent']}%", 
+                    level="INFO")
 
         self._write_local_health_status(issues, thread_status)
     
     def _write_local_health_status(self, issues, thread_status):
         """Write local health JSON for reboot watchdog (local-first hang detection)."""
         cb_health = self.circular_buffer.get_health()
+        encode_only = cb_health.get('encode_only_soak', self.encode_only_soak)
         last_frame_time = cb_health.get('last_frame_time')
         noframes_seconds = 0
-        if last_frame_time:
+        if last_frame_time and not encode_only:
             noframes_seconds = max(0, int(time.time() - last_frame_time))
+
+        encode_stale_seconds = int(cb_health.get('encode_stale_seconds', 0) or 0)
+        encode_stale_minutes = encode_stale_seconds // 60
 
         alive_threads = sum(1 for t in thread_status.values() if t['alive'])
         total_threads = len(thread_status)
@@ -191,9 +204,17 @@ class SystemWatchdog:
             'camera_id': config.CAMERA_ID,
             'healthy': len(issues) == 0,
             'issues': issues,
+            'encode_only_soak': encode_only,
             'noframes_seconds': noframes_seconds,
             'noframes_minutes': noframes_seconds // 60,
+            'encode_stale_seconds': encode_stale_seconds,
+            'encode_stale_minutes': encode_stale_minutes,
+            'encode_chunks': cb_health.get('encode_chunks', 0),
+            'encode_utilization_pct': cb_health.get('encode_utilization_pct', 0),
+            'encode_eviction_count': cb_health.get('encode_eviction_count', 0),
+            'encode_healthy': cb_health.get('encode_healthy', False),
             'last_frame_time': last_frame_time,
+            'last_encode_chunk_time': cb_health.get('last_encode_chunk_time'),
             'frame_count': cb_health.get('frame_count', 0),
             'threads_alive': alive_threads,
             'threads_total': total_threads,
@@ -227,14 +248,19 @@ class SystemWatchdog:
         
         # Activity summary
         log("Activity (last 5 minutes):", level="INFO")
-        motion_checks = self.motion_detector.check_count - self.last_motion_checks
+        if self.encode_only_soak:
+            cb_health = self.circular_buffer.get_health()
+            log(f"  Encode chunks: {cb_health.get('encode_chunks', 0)} "
+                f"({cb_health.get('encode_utilization_pct', 0):.0f}% util)", level="INFO")
+        else:
+            motion_checks = self.motion_detector.check_count - self.last_motion_checks
+            log(f"  Motion checks: {motion_checks}", level="INFO")
+            self.last_motion_checks = self.motion_detector.check_count
         files_transferred = self.transfer_manager.files_transferred - self.last_files_transferred
         
-        log(f"  Motion checks: {motion_checks}", level="INFO")
         log(f"  Files transferred: {files_transferred}", level="INFO")
         
         # Update last values
-        self.last_motion_checks = self.motion_detector.check_count
         self.last_files_transferred = self.transfer_manager.files_transferred
         
         # Hardware health
@@ -269,52 +295,75 @@ class SystemWatchdog:
         
         # CircularBuffer - Enhanced with state detection
         cb_health = self.circular_buffer.get_health()
-        time_since_frame = time.time() - cb_health['last_frame_time'] if cb_health['last_frame_time'] else 999
-        
-        # Check for hung thread
-        thread_state = cb_health.get('thread_state', 'UNKNOWN')
-        time_in_state = cb_health.get('time_in_current_state', 0)
-        time_since_success = cb_health.get('time_since_successful_capture', 999)
-        
-        # Detect hung states
-        if thread_state == "CALLING_CAPTURE_ARRAY" and time_in_state > 5.0:
-            details = f"🚨 HUNG in capture_array() for {time_in_state:.1f}s!"
-        elif thread_state == "SLEEPING" and time_in_state > 10.0:
-            details = f"⚠️  Stuck sleeping for {time_in_state:.1f}s"
-        elif time_since_frame < 60:
-            details = f"last frame {time_since_frame:.1f}s ago, state: {thread_state}"
+        encode_only = cb_health.get('encode_only_soak', self.encode_only_soak)
+
+        if encode_only:
+            stale = cb_health.get('encode_stale_seconds', 999)
+            chunks = cb_health.get('encode_chunks', 0)
+            thread_state = cb_health.get('thread_state', 'UNKNOWN')
+            if thread_state == "ENCODE_STALE":
+                details = f"🚨 ENCODE STALE {stale:.0f}s, chunks={chunks}"
+            elif stale < 60:
+                details = f"encode active, {chunks} chunks, last advance {stale:.0f}s ago"
+            else:
+                details = f"STALE ENCODE ({stale/60:.0f}m), chunks={chunks}, state={thread_state}"
+            status['CircularBufferEncode'] = {
+                'alive': cb_health['thread_alive'],
+                'details': details
+            }
         else:
-            details = f"STALE FRAMES ({time_since_frame/60:.0f}m), state: {thread_state}, in_state: {time_in_state:.1f}s"
+            time_since_frame = time.time() - cb_health['last_frame_time'] if cb_health['last_frame_time'] else 999
+            
+            # Check for hung thread
+            thread_state = cb_health.get('thread_state', 'UNKNOWN')
+            time_in_state = cb_health.get('time_in_current_state', 0)
+            
+            # Detect hung states
+            if thread_state == "CALLING_CAPTURE_ARRAY" and time_in_state > 5.0:
+                details = f"🚨 HUNG in capture_array() for {time_in_state:.1f}s!"
+            elif thread_state == "SLEEPING" and time_in_state > 10.0:
+                details = f"⚠️  Stuck sleeping for {time_in_state:.1f}s"
+            elif time_since_frame < 60:
+                details = f"last frame {time_since_frame:.1f}s ago, state: {thread_state}"
+            else:
+                details = f"STALE FRAMES ({time_since_frame/60:.0f}m), state: {thread_state}, in_state: {time_in_state:.1f}s"
+            
+            status['CircularBufferCapture'] = {
+                'alive': cb_health['thread_alive'],
+                'details': details
+            }
         
-        status['CircularBufferCapture'] = {
-            'alive': cb_health['thread_alive'],
-            'details': details
-        }
-        
-        # MotionDetector
-        md_health = self.motion_detector.get_health()
-        motion_delta = self.motion_detector.check_count - self.last_motion_checks
-        if md_health['in_cooldown']:
-            details = f"in cooldown"
-        elif md_health['paused']:
-            details = f"paused"
-        else:
-            details = f"{motion_delta} checks since last report"
-        status['MotionDetector'] = {
-            'alive': md_health['thread_alive'],
-            'details': details
-        }
+        # MotionDetector (skipped in encode-only soak)
+        if not encode_only and self.motion_detector:
+            md_health = self.motion_detector.get_health()
+            motion_delta = self.motion_detector.check_count - self.last_motion_checks
+            if md_health['in_cooldown']:
+                details = f"in cooldown"
+            elif md_health['paused']:
+                details = f"paused"
+            else:
+                details = f"{motion_delta} checks since last report"
+            status['MotionDetector'] = {
+                'alive': md_health['thread_alive'],
+                'details': details
+            }
         
         # EventProcessor
-        ep_health = self.event_processor.get_health()
-        if ep_health['is_processing']:
-            details = f"processing event"
-        else:
-            details = f"waiting for events"
-        status['EventProcessor'] = {
-            'alive': ep_health['thread_alive'],
-            'details': details
-        }
+        if self.event_processor:
+            ep_health = self.event_processor.get_health()
+            if ep_health['is_processing']:
+                details = f"processing event"
+            else:
+                details = f"waiting for events"
+            status['EventProcessor'] = {
+                'alive': ep_health['thread_alive'],
+                'details': details
+            }
+        elif encode_only:
+            status['EventProcessor'] = {
+                'alive': True,
+                'details': 'disabled (encode-only soak)'
+            }
         
         # TransferManager
         tm_health = self.transfer_manager.get_health()
@@ -342,10 +391,29 @@ class SystemWatchdog:
         """
         issues = []
         
+        cb_health = self.circular_buffer.get_health()
+        encode_only = cb_health.get('encode_only_soak', self.encode_only_soak)
+
+        if encode_only:
+            threshold = config.ENCODE_STALE_THRESHOLD_SECONDS
+            stale = cb_health.get('encode_stale_seconds', 999)
+            if stale > threshold:
+                if stale < 3600:
+                    formatted_time = f"{int(stale/60)}m"
+                elif stale < 86400:
+                    hours = int(stale/3600)
+                    minutes = int((stale % 3600)/60)
+                    formatted_time = f"{hours}h{minutes}m"
+                else:
+                    days = int(stale/86400)
+                    hours = int((stale % 86400)/3600)
+                    formatted_time = f"{days}d{hours}h"
+                issues.append(f"NoEncode:{formatted_time}")
+            return issues
+        
         # ===================================================================
         # ENHANCED FRAME CAPTURE CHECKING WITH FREEZE DETECTION
         # ===================================================================
-        cb_health = self.circular_buffer.get_health()
         
         # Check 1: Are we getting captures at all?
         if cb_health['last_frame_time']:
@@ -368,51 +436,45 @@ class SystemWatchdog:
         # Check 2: Are frames actually changing? (Freeze detection)
         frame_health = self._check_frame_freeze(cb_health)
         if frame_health['frozen']:
-            # Get motion detector state to provide context
-            md_health = self.motion_detector.get_health()
-            
-            # Only report as frozen if motion detector should be running
-            # (Not paused for streaming, not in cooldown)
-            if not md_health['paused'] and not md_health['in_cooldown']:
-                reason = frame_health['reason']
-                duration = frame_health.get('duration', 0)
-                
-                if duration < 60:
-                    duration_str = f"{int(duration)}s"
-                elif duration < 3600:
-                    duration_str = f"{int(duration/60)}m"
-                else:
-                    hours = int(duration/3600)
-                    minutes = int((duration % 3600)/60)
-                    duration_str = f"{hours}h{minutes}m"
-                
-                # Add issue with frozen indicator
-                if reason == 'identical_frames':
-                    unique = frame_health.get('unique_in_last_10', 0)
-                    issues.append(f"FrozenFrames:{duration_str}(unique:{unique}/10)")
+            if self.motion_detector:
+                md_health = self.motion_detector.get_health()
+                if not md_health['paused'] and not md_health['in_cooldown']:
+                    reason = frame_health['reason']
+                    duration = frame_health.get('duration', 0)
                     
-                    # Trigger comprehensive diagnostics (rate-limited)
-                    current_time = time.time()
-                    if current_time - self.last_freeze_diagnostic_time > self.freeze_diagnostic_interval:
-                        self._capture_camera_diagnostics()
-                        self.last_freeze_diagnostic_time = current_time
+                    if duration < 60:
+                        duration_str = f"{int(duration)}s"
+                    elif duration < 3600:
+                        duration_str = f"{int(duration/60)}m"
+                    else:
+                        hours = int(duration/3600)
+                        minutes = int((duration % 3600)/60)
+                        duration_str = f"{hours}h{minutes}m"
+                    
+                    if reason == 'identical_frames':
+                        unique = frame_health.get('unique_in_last_10', 0)
+                        issues.append(f"FrozenFrames:{duration_str}(unique:{unique}/10)")
+                        
+                        current_time = time.time()
+                        if current_time - self.last_freeze_diagnostic_time > self.freeze_diagnostic_interval:
+                            self._capture_camera_diagnostics()
+                            self.last_freeze_diagnostic_time = current_time
+                    else:
+                        issues.append(f"CameraFrozen:{reason}")
                 else:
-                    issues.append(f"CameraFrozen:{reason}")
-            else:
-                # Provide context in debug logging
-                if md_health['paused']:
-                    log(f"[FREEZE DEBUG] Identical frames detected but motion detector is PAUSED (streaming mode)", level="DEBUG")
-                elif md_health['in_cooldown']:
-                    log(f"[FREEZE DEBUG] Identical frames detected but motion detector is in COOLDOWN", level="DEBUG")
+                    if md_health['paused']:
+                        log(f"[FREEZE DEBUG] Identical frames detected but motion detector is PAUSED (streaming mode)", level="DEBUG")
+                    elif md_health['in_cooldown']:
+                        log(f"[FREEZE DEBUG] Identical frames detected but motion detector is in COOLDOWN", level="DEBUG")
         # ===================================================================
         
         # Check motion detector
-        current_checks = self.motion_detector.check_count
-        if current_checks == self.last_motion_checks:
-            # Only flag if NOT in cooldown or paused
-            md_health = self.motion_detector.get_health()
-            if not md_health['in_cooldown'] and not md_health['paused']:
-                issues.append("MotionStuck")
+        if self.motion_detector:
+            current_checks = self.motion_detector.check_count
+            if current_checks == self.last_motion_checks:
+                md_health = self.motion_detector.get_health()
+                if not md_health['in_cooldown'] and not md_health['paused']:
+                    issues.append("MotionStuck")
         
         return issues
     
@@ -552,12 +614,13 @@ class SystemWatchdog:
                         log(f"  ✅ Hashes are RECENT (capture thread active)", level="ERROR")
             
             # 3. Motion Detector State
-            md_health = self.motion_detector.get_health()
-            log("Motion Detector State:", level="ERROR")
-            log(f"  Thread alive: {md_health['thread_alive']}", level="ERROR")
-            log(f"  Paused: {md_health['paused']}", level="ERROR")
-            log(f"  In cooldown: {md_health['in_cooldown']}", level="ERROR")
-            log(f"  Check count: {md_health['check_count']}", level="ERROR")
+            if self.motion_detector:
+                md_health = self.motion_detector.get_health()
+                log("Motion Detector State:", level="ERROR")
+                log(f"  Thread alive: {md_health['thread_alive']}", level="ERROR")
+                log(f"  Paused: {md_health['paused']}", level="ERROR")
+                log(f"  In cooldown: {md_health['in_cooldown']}", level="ERROR")
+                log(f"  Check count: {md_health['check_count']}", level="ERROR")
             
             # 4. Hardware Camera Detection
             camera_detected = self._check_camera_detected()

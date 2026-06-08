@@ -142,6 +142,14 @@ class CircularBuffer:
         
         # Motion detector reference (for pause/resume during streaming)
         self.motion_detector = None
+
+        self.encode_only_soak = config.ENCODE_ONLY_SOAK
+        self.use_lores_capture = config.USE_LORES_CAPTURE and not self.encode_only_soak
+        self.capture_stream_name = "lores" if self.use_lores_capture else "main"
+        self.last_encode_chunk_time = 0
+        self.last_encode_chunk_count = 0
+        self.last_encode_eviction_count = 0
+        self.encode_monitor_thread = None
         
     @property
     def capture_interval(self):
@@ -187,16 +195,48 @@ class CircularBuffer:
             # ===================================================================
             
             # Configure for video
-            video_config = self.picam2.create_video_configuration(
-                main={
-                    "size": self.resolution,
-                    "format": "RGB888"
-                },
-                controls={
-                    "FrameRate": self.framerate
-                }
-            )
-            
+            if self.encode_only_soak:
+                log(f"Capture mode: ENCODE-ONLY SOAK (main H264 only, no capture_array)")
+                video_config = self.picam2.create_video_configuration(
+                    main={
+                        "size": self.resolution,
+                        "format": "YUV420",
+                    },
+                    controls={
+                        "FrameRate": self.framerate,
+                    },
+                    encode="main",
+                )
+            elif self.use_lores_capture:
+                log(f"Capture mode: lores-only arrays, main encode-only "
+                    f"(main={self.resolution}, lores={config.LORES_RESOLUTION})")
+                video_config = self.picam2.create_video_configuration(
+                    main={
+                        "size": self.resolution,
+                        "format": "YUV420",
+                    },
+                    lores={
+                        "size": config.LORES_RESOLUTION,
+                        "format": "YUV420",
+                    },
+                    controls={
+                        "FrameRate": self.framerate,
+                    },
+                    encode="main",
+                )
+            else:
+                log(f"Capture mode: legacy main capture_array + encode "
+                    f"(main={self.resolution} RGB888)")
+                video_config = self.picam2.create_video_configuration(
+                    main={
+                        "size": self.resolution,
+                        "format": "RGB888",
+                    },
+                    controls={
+                        "FrameRate": self.framerate,
+                    },
+                )
+
             self.picam2.configure(video_config)
             
             # Create H.264 encoder with keyframe interval
@@ -254,15 +294,26 @@ class CircularBuffer:
             self.picam2.start_encoder(self.encoder, self.circular_output)
             log(f"H.264 circular buffer recording started (keyframe every {intra_period} frames)")
             
-            # Start picture capture thread
             self.running = True
-            self.capture_thread = threading.Thread(
-                target=self._capture_pictures,
-                name="PictureCapture",
-                daemon=True
-            )
-            self.capture_thread.start()
-            log("Picture capture thread started")
+            if self.encode_only_soak:
+                self.capture_thread_state = "ENCODE_MONITOR_STARTING"
+                self.last_state_change_time = time.time()
+                self.encode_monitor_thread = threading.Thread(
+                    target=self._encode_monitor_loop,
+                    name="EncodeMonitor",
+                    daemon=True
+                )
+                self.encode_monitor_thread.start()
+                self.capture_thread = self.encode_monitor_thread
+                log("Encode-only soak: monitor thread started (no picture capture)")
+            else:
+                self.capture_thread = threading.Thread(
+                    target=self._capture_pictures,
+                    name="PictureCapture",
+                    daemon=True
+                )
+                self.capture_thread.start()
+                log("Picture capture thread started")
             
             log("CircularBuffer started successfully")
             
@@ -483,6 +534,57 @@ class CircularBuffer:
             gc.collect()
             raise
 
+    def _encode_monitor_loop(self):
+        """Track H264 buffer advancement during encode-only soak (no capture_array)."""
+        log("Encode monitor loop started (encode-only soak)")
+        self.capture_thread_state = "ENCODE_MONITORING"
+        self.last_state_change_time = time.time()
+        last_seen_chunks = -1
+        last_seen_evictions = -1
+        log_interval = 60
+        last_log_time = time.time()
+
+        while self.running:
+            try:
+                bh = self.get_buffer_health()
+                now = time.time()
+                if bh:
+                    chunks = bh['current_chunks']
+                    evictions = bh['eviction_count']
+                    advanced = (
+                        (last_seen_chunks >= 0 and chunks != last_seen_chunks)
+                        or (last_seen_evictions >= 0 and evictions > last_seen_evictions)
+                        or (last_seen_chunks < 0 and chunks > 0)
+                    )
+                    if advanced:
+                        self.last_encode_chunk_time = now
+                        self.last_encode_chunk_count = chunks
+                        self.last_encode_eviction_count = evictions
+                        self.capture_thread_state = "ENCODE_ACTIVE"
+                    elif self.last_encode_chunk_time:
+                        stale = now - self.last_encode_chunk_time
+                        if stale > config.ENCODE_STALE_THRESHOLD_SECONDS:
+                            self.capture_thread_state = "ENCODE_STALE"
+
+                    last_seen_chunks = chunks
+                    last_seen_evictions = evictions
+
+                    if now - last_log_time >= log_interval:
+                        stale = (now - self.last_encode_chunk_time) if self.last_encode_chunk_time else -1
+                        log(f"[ENCODE SOAK] chunks={chunks}/{bh['max_chunks']} "
+                            f"util={bh['utilization_pct']:.0f}% evictions={evictions} "
+                            f"last_advance={stale:.0f}s_ago state={self.capture_thread_state}")
+                        last_log_time = now
+
+                self.last_state_change_time = now
+                time.sleep(5)
+            except Exception as e:
+                if self.running:
+                    log(f"Encode monitor error: {e}", level="ERROR")
+                    time.sleep(5)
+
+        log("Encode monitor loop stopped")
+
     def _capture_pictures(self):
         import gc
         
@@ -492,7 +594,8 @@ class CircularBuffer:
         self.last_successful_capture_time = 0
         
         capture_start_time = time.time()  # Local variable, not self attribute
-        log(f"Picture capture loop started (initial interval: {self.capture_interval}s)")
+        log(f"Picture capture loop started (stream={self.capture_stream_name}, "
+            f"initial interval: {self.capture_interval}s)")
         frame_count = 0
         last_logged_interval = self.capture_interval
         
@@ -520,7 +623,7 @@ class CircularBuffer:
                     self.last_state_change_time = time.time()
                     capture_call_start = time.time()
                     
-                    frame = self.picam2.capture_array()
+                    frame = self._capture_picture_frame()
                     
                     capture_call_duration = time.time() - capture_call_start
                     self.capture_thread_state = "CAPTURE_SUCCESSFUL"
@@ -529,7 +632,8 @@ class CircularBuffer:
                     
                     # Log slow captures
                     if capture_call_duration > 2.0:
-                        log(f"⚠️  SLOW CAPTURE: capture_array() took {capture_call_duration:.2f}s", level="WARNING")
+                        log(f"⚠️  SLOW CAPTURE: capture_array({self.capture_stream_name}) "
+                            f"took {capture_call_duration:.2f}s", level="WARNING")
                     
                 except Exception as e:
                     self.capture_thread_state = f"CAPTURE_EXCEPTION: {type(e).__name__}"
@@ -650,6 +754,29 @@ class CircularBuffer:
                     time.sleep(1)
         
         log("Picture capture loop stopped")
+
+    def _yuv420_to_rgb(self, yuv, size):
+        """Convert Picamera2 YUV420 plane to RGB888 numpy array."""
+        import cv2
+
+        width, height = size
+        if yuv.ndim != 2:
+            return yuv
+
+        plane = yuv[: int(height * 1.5), :width]
+        return cv2.cvtColor(plane, cv2.COLOR_YUV420p2RGB)
+
+    def _capture_picture_frame(self):
+        """
+        Capture one frame for the picture buffer as RGB888.
+
+        Uses lores stream when USE_LORES_CAPTURE is enabled so main is encode-only.
+        """
+        if self.use_lores_capture:
+            raw = self.picam2.capture_array("lores")
+            return self._yuv420_to_rgb(raw, config.LORES_RESOLUTION)
+
+        return self.picam2.capture_array("main")
     
     def get_frames_for_detection(self):
         """
@@ -745,9 +872,9 @@ class CircularBuffer:
         from PIL import Image
 
         try:
-            if force_color and self.picam2:
-                # Capture a fresh color image directly from sensor
-                color_frame = self.picam2.capture_array("main")  # RGB888 by default
+            if force_color and self.picam2 and not self.use_lores_capture:
+                # Capture a fresh color image directly from sensor (legacy main path)
+                color_frame = self.picam2.capture_array("main")
                 img = Image.fromarray(color_frame)
                 img.save(filepath, "JPEG", quality=config.JPEG_QUALITY)
                 log(f"Saved COLOR image: {filepath}")
@@ -802,8 +929,13 @@ class CircularBuffer:
                 # 🚨 Fallback path: legacy raw array -> Pillow JPEG
                 log(f"[WARNING] capture_file() failed ({e}); using fallback capture_array() method.")
 
-                color_frame = self.picam2.capture_array("main")
-                log(f"[DEBUG] dtype={color_frame.dtype}, shape={color_frame.shape}")
+                stream = self.capture_stream_name
+                raw = self.picam2.capture_array(stream)
+                if self.use_lores_capture:
+                    color_frame = self._yuv420_to_rgb(raw, config.LORES_RESOLUTION)
+                else:
+                    color_frame = raw
+                log(f"[DEBUG] stream={stream}, dtype={color_frame.dtype}, shape={color_frame.shape}")
 
                 # Handle grayscale fallback
                 if len(color_frame.shape) == 2:
@@ -1119,15 +1251,40 @@ class CircularBuffer:
 
     def get_health(self):
         """Get health status for watchdog monitoring."""
+        current_time = time.time()
+        thread_state = getattr(self, 'capture_thread_state', 'UNKNOWN')
+        time_in_current_state = current_time - getattr(self, 'last_state_change_time', current_time)
+
+        if self.encode_only_soak:
+            monitor = self.encode_monitor_thread or self.capture_thread
+            bh = self.get_buffer_health() or {}
+            last_encode = self.last_encode_chunk_time
+            stale_seconds = (current_time - last_encode) if last_encode else 999
+            threshold = config.ENCODE_STALE_THRESHOLD_SECONDS
+            return {
+                'thread_alive': monitor.is_alive() if monitor else False,
+                'last_frame_time': last_encode,
+                'last_encode_chunk_time': last_encode,
+                'encode_stale_seconds': stale_seconds,
+                'encode_chunks': bh.get('current_chunks', 0),
+                'encode_max_chunks': bh.get('max_chunks', 0),
+                'encode_utilization_pct': bh.get('utilization_pct', 0),
+                'encode_eviction_count': bh.get('eviction_count', 0),
+                'encode_healthy': last_encode > 0 and stale_seconds < threshold,
+                'encode_only_soak': True,
+                'frame_count': 0,
+                'running': self.running,
+                'camera_initialized': self.picam2 is not None,
+                'thread_state': thread_state,
+                'time_in_current_state': time_in_current_state,
+                'time_since_successful_capture': stale_seconds,
+            }
+
         # Calculate unique frame hashes for freeze detection
         unique_hashes_recent = 0
         if len(self.frame_hash_history) >= 10:
             unique_hashes_recent = len(set(list(self.frame_hash_history)[-10:]))
         
-        # Get thread state info
-        current_time = time.time()
-        thread_state = getattr(self, 'capture_thread_state', 'UNKNOWN')
-        time_in_current_state = current_time - getattr(self, 'last_state_change_time', current_time)
         time_since_successful_capture = current_time - getattr(self, 'last_successful_capture_time', 0)
         
         return {
@@ -1136,12 +1293,15 @@ class CircularBuffer:
             'frame_count': self.frame_count,
             'running': self.running,
             'camera_initialized': self.picam2 is not None,
-            'frame_hash_history': list(self.frame_hash_history),  # For detailed analysis
+            'frame_hash_history': list(self.frame_hash_history),
             'frame_hash_timestamps': list(self.frame_hash_timestamps),
-            'unique_hashes_recent': unique_hashes_recent,  # Quick check
-            'thread_state': thread_state,  # NEW: What is thread doing?
-            'time_in_current_state': time_in_current_state,  # NEW: How long in this state?
-            'time_since_successful_capture': time_since_successful_capture  # NEW: Time since last success
+            'unique_hashes_recent': unique_hashes_recent,
+            'thread_state': thread_state,
+            'capture_stream': self.capture_stream_name,
+            'use_lores_capture': self.use_lores_capture,
+            'encode_only_soak': False,
+            'time_in_current_state': time_in_current_state,
+            'time_since_successful_capture': time_since_successful_capture
         }
 
     def stop(self):
