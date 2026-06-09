@@ -115,13 +115,15 @@ print(
 )
 PY
 )"
-    emit camera_agent_hang_events_total "$HANGS_TOTAL"
-    emit camera_agent_recovery_events_total "$RECOV_TOTAL"
-    emit camera_agent_hangs_last_24h "$HANGS_24H"
-    emit camera_agent_recoveries_last_24h "$RECOV_24H"
-    [ "$LAST_HANG_TS" -gt 0 ] && emit camera_agent_last_hang_timestamp "$LAST_HANG_TS"
-    [ "$LAST_RECOV_TS" -gt 0 ] && emit camera_agent_last_recovery_timestamp "$LAST_RECOV_TS"
+  else
+    HANGS_TOTAL=0 RECOV_TOTAL=0 HANGS_24H=0 RECOV_24H=0 LAST_HANG_TS=0 LAST_RECOV_TS=0
   fi
+  emit camera_agent_hang_events_total "$HANGS_TOTAL"
+  emit camera_agent_recovery_events_total "$RECOV_TOTAL"
+  emit camera_agent_hangs_last_24h "$HANGS_24H"
+  emit camera_agent_recoveries_last_24h "$RECOV_24H"
+  [ "$LAST_HANG_TS" -gt 0 ] && emit camera_agent_last_hang_timestamp "$LAST_HANG_TS"
+  [ "$LAST_RECOV_TS" -gt 0 ] && emit camera_agent_last_recovery_timestamp "$LAST_RECOV_TS"
 
   if curl -m 2 -sf http://192.168.1.26:8000/ >/dev/null 2>&1; then
     emit camera_central_api_reachable 1
