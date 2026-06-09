@@ -133,12 +133,12 @@ class Config:
         # At ~12KB per chunk average:
         #   1000 chunks ≈ 12 MB ≈ 20-30 seconds
         #   1500 chunks ≈ 18 MB ≈ 30-40 seconds
-        #   2000 chunks ≈ 24 MB ≈ 40-60 seconds  (RECOMMENDED - single continuous dump)
-        self.CIRCULAR_BUFFER_MAX_CHUNKS = 2500
+        #   2000 chunks ≈ 24 MB ≈ 40-60 seconds
+        self.CIRCULAR_BUFFER_MAX_CHUNKS = 2000
         
         # Maximum memory for circular buffer (bytes)
         # Safety limit to prevent runaway memory usage
-        self.CIRCULAR_BUFFER_MAX_BYTES = 60 * 1024 * 1024  # 60 MB
+        self.CIRCULAR_BUFFER_MAX_BYTES = 48 * 1024 * 1024  # 48 MB
         
         # NOTE: BUFFER_DURATION_SECONDS removed - now capacity-driven
         # The actual duration will be logged during operation
@@ -164,6 +164,10 @@ class Config:
         # How often to capture full-resolution frames for motion detection (seconds)
         # These frames are used for both motion comparison AND saving as Picture A/B
         self.PICTURE_CAPTURE_INTERVAL = 1.0
+
+        # Frame freeze detection: lightweight subsampled hash (not full-frame SHA256).
+        self.FRAME_HASH_USE_LIGHTWEIGHT = True
+        self.FRAME_HASH_SAMPLE_SIZE = (32, 24)
         
         # Event stills (Picture A/B): save from picture buffer instead of picam2 still capture.
         # Avoids concurrent capture_file/capture_array during H264 encoding (stability).
@@ -354,7 +358,7 @@ class Config:
         self.STREAM_MAX_DURATION_SECONDS = 1800 # Maximum stream duration (30 minutes)
 
         # System version (semantic versioning)
-        self.SYSTEM_VERSION = "1.1.29"
+        self.SYSTEM_VERSION = "1.1.31"
 
         # Note: PICTURE_CAPTURE_INTERVAL is the default normal capture interval
         # When streaming starts, it's changed to STREAMING_CAPTURE_INTERVAL

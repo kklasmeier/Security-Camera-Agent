@@ -41,7 +41,8 @@ Python-based security camera agent running on Raspberry Pi (Zero 2W/Pi 4/Pi 5) a
 - **camera_agent.sh** - systemd service launcher script
 - **camera_controller.sh** - Controller service launcher
 - **run.sh** - Quick start script for development/testing
-- **gitsync.sh** - Git synchronization utility
+- **gitsync.sh** - Interactive commit/push to GitHub (fleet releases)
+- **Docs/DEPLOYMENT.md** - Fleet deployment workflow (Study NFS dev node + Ansible production)
 - **killpython.sh** - Emergency process cleanup
 
 ## Data Flow

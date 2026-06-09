@@ -416,7 +416,7 @@ class StreamingChecker:
         """
         try:
             import requests
-            response = requests.get(f"{self.api_base}/streaming/status", timeout=5)
+            response = requests.get(f"{self.api_base}/api/health", timeout=5)
             
             if response.status_code == 200:
                 data = response.json()

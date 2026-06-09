@@ -40,6 +40,7 @@ Security-Camera-Agent/
 ├── Documentation
 │   ├── README.md                    Project overview
 │   ├── SETUP.md                     Setup instructions
+│   ├── DEPLOYMENT.md                Fleet release workflow (Study NFS + Ansible)
 │   ├── LICENSE                      Apache 2.0 license
 │   ├── PROJECT.md                   [NEW] Comprehensive project docs
 │   └── INVENTORY_SUMMARY.md         [NEW] Inventory findings

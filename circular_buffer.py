@@ -658,10 +658,7 @@ class CircularBuffer:
                 self.capture_thread_state = "COMPUTING_HASH"
                 self.last_state_change_time = time.time()
                 
-                # Compute hash of raw frame to detect if camera is frozen
-                # Uses SHA256 for reliable detection - ~10-20ms overhead per frame
-                import hashlib
-                frame_hash = hashlib.sha256(frame.tobytes()).hexdigest()[:16]  # Short hash (64-bit)
+                frame_hash = self._frame_fingerprint(frame)
                 
                 # Store hash and timestamp in ring buffer
                 self.frame_hash_history.append(frame_hash)
@@ -717,11 +714,6 @@ class CircularBuffer:
                 if old_previous is not None:
                     del old_previous
                 
-                # Force GC every 500 frames
-                if frame_count % 500 == 0:  # Every ~4 minutes
-                    gc.collect()
-                    time.sleep(0.1)  # Breathing room after GC
-                
                 # Responsive sleep that checks for interval changes
                 # Read target at start of sleep period
                 self.capture_thread_state = "SLEEPING"
@@ -765,6 +757,50 @@ class CircularBuffer:
 
         plane = yuv[: int(height * 1.5), :width]
         return cv2.cvtColor(plane, cv2.COLOR_YUV420p2RGB)
+
+    def _frame_rgb_for_jpeg(self, frame):
+        """
+        Prepare a picture-buffer frame for PIL JPEG (RGB byte order).
+
+        Lores YUV420 frames are converted with OpenCV and stored in BGR order.
+        PIL/Image.fromarray(..., mode='RGB') expects R-G-B; without conversion,
+        reds and blues are swapped (same fix as mjpeg_server.py).
+        """
+        import cv2
+        import numpy as np
+
+        if len(frame.shape) == 2:
+            frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
+        elif frame.shape[2] == 4:
+            frame = frame[:, :, :3]
+
+        if len(frame.shape) == 3 and frame.shape[2] == 3:
+            if self.use_lores_capture or not self.is_noir:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        if frame.dtype != np.uint8:
+            frame = frame.astype(np.uint8)
+        return frame
+
+    def _frame_fingerprint(self, frame):
+        """
+        Lightweight fingerprint for freeze detection.
+
+        Subsamples to FRAME_HASH_SAMPLE_SIZE (~2 KB) instead of hashing the full
+        lores RGB frame (~900 KB) with SHA256.
+        """
+        import cv2
+
+        if config.FRAME_HASH_USE_LIGHTWEIGHT:
+            small = cv2.resize(
+                frame,
+                config.FRAME_HASH_SAMPLE_SIZE,
+                interpolation=cv2.INTER_AREA,
+            )
+            return format(hash(small.tobytes()) & 0xFFFFFFFFFFFFFFFF, '016x')
+
+        import hashlib
+        return hashlib.sha256(frame.tobytes()).hexdigest()[:16]
 
     def _capture_picture_frame(self):
         """
@@ -821,8 +857,6 @@ class CircularBuffer:
         """
         from PIL import Image
         import gc
-        import cv2
-        import numpy as np
 
         img = None
         try:
@@ -831,14 +865,7 @@ class CircularBuffer:
                     raise RuntimeError("No frame available in picture buffer")
                 frame_copy = self.current_frame.copy()
 
-            if len(frame_copy.shape) == 2:
-                frame_copy = cv2.cvtColor(frame_copy, cv2.COLOR_GRAY2RGB)
-            elif frame_copy.shape[2] == 4:
-                frame_copy = frame_copy[:, :, :3]
-
-            if frame_copy.dtype != np.uint8:
-                frame_copy = frame_copy.astype(np.uint8)
-
+            frame_copy = self._frame_rgb_for_jpeg(frame_copy)
             img = Image.fromarray(frame_copy, mode="RGB")
             img.save(filepath, "JPEG", quality=int(config.JPEG_QUALITY))
             log(f"Saved buffered still: {filepath}")
@@ -887,7 +914,8 @@ class CircularBuffer:
                     raise RuntimeError("No frame available to save")
                 frame_copy = self.current_frame.copy()
 
-            img = Image.fromarray(frame_copy)
+            frame_copy = self._frame_rgb_for_jpeg(frame_copy)
+            img = Image.fromarray(frame_copy, mode="RGB")
             img.save(filepath, "JPEG", quality=config.JPEG_QUALITY)
             log(f"Saved image: {filepath}")
 
@@ -937,14 +965,7 @@ class CircularBuffer:
                     color_frame = raw
                 log(f"[DEBUG] stream={stream}, dtype={color_frame.dtype}, shape={color_frame.shape}")
 
-                # Handle grayscale fallback
-                if len(color_frame.shape) == 2:
-                    log("[DEBUG] Detected grayscale frame — converting to RGB for color snapshot")
-                    color_frame = cv2.cvtColor(color_frame, cv2.COLOR_GRAY2RGB)
-
-                # Normalize to 8-bit if needed
-                if color_frame.dtype != np.uint8:
-                    color_frame = color_frame.astype(np.uint8)
+                color_frame = self._frame_rgb_for_jpeg(color_frame)
 
                 img = Image.fromarray(color_frame, mode="RGB")
                 img.save(filepath, "JPEG", quality=int(config.JPEG_QUALITY))

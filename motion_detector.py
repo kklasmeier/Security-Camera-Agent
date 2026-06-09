@@ -256,7 +256,7 @@ class MotionDetector:
                         log(f"Cooldown: {remaining:.1f}s remaining (check #{self.check_count})")
                         last_log_time = current_time
 
-                    time.sleep(0.5)
+                    time.sleep(config.PICTURE_CAPTURE_INTERVAL)
                     continue
 
                 # Get frames from circular buffer
@@ -267,7 +267,7 @@ class MotionDetector:
                     if current_time - last_log_time >= 5.0:
                         log(f"Waiting for frames... (check #{self.check_count})")
                         last_log_time = current_time
-                    time.sleep(0.5)
+                    time.sleep(config.PICTURE_CAPTURE_INTERVAL)
                     continue
 
                 # Detect motion using pixel-diff algorithm
@@ -299,11 +299,6 @@ class MotionDetector:
 
                     self._handle_motion_event(current_frame, changed_pixels)
                     last_log_time = current_time
-
-                if self.check_count % 50 == 0:      # every ~50 frames or checks
-                    gc.collect()
-                    cv2.setUseOptimized(False)
-                    cv2.setUseOptimized(True)
 
                 # Wait before next check
                 time.sleep(config.PICTURE_CAPTURE_INTERVAL)

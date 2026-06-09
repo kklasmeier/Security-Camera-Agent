@@ -344,7 +344,7 @@ class SystemWatchdog:
         try:
             import requests
             response = requests.get(
-                f"{config.CAMERA_CONTROL_API_BASE}/streaming/status",
+                f"{config.CAMERA_CONTROL_API_BASE}/api/health",
                 timeout=5,
             )
             if response.status_code == 200:

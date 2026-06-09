@@ -318,7 +318,9 @@ journalctl -u security-camera-agent -f
 
 ## 9. 🔄 Updating Camera Software
 
-When you make improvements to the camera software, deployment is simple:
+### Single camera (manual)
+
+On a standalone Pi **not** using the fleet NFS/Ansible workflow:
 
 ```bash
 cd /home/pi/Security-Camera-Agent
@@ -326,13 +328,20 @@ git pull
 sudo systemctl restart security-camera-agent
 ```
 
-**Your `config_local.py` file is git-ignored and will NOT be overwritten during updates!**
+**`config_local.py` is git-ignored and will NOT be overwritten during updates.**
 
-This means:
-- ✅ Camera identity stays intact
-- ✅ No need to reconfigure after updates
-- ✅ Same process works for all cameras
-- ✅ Quick, safe, and repeatable
+### Fleet deployment (Study + 4 production cameras)
+
+For this project’s normal release process, see **[Docs/DEPLOYMENT.md](Docs/DEPLOYMENT.md)**.
+
+Summary:
+
+1. **Study (`.21`)** — The dev working folder is an **NFS mount** of Study’s `/home/pi/Security-Camera-Agent`. Code edits apply there directly; **no** manual `git pull` or Ansible on Study.
+2. **Version** — Bump `SYSTEM_VERSION` in `config.py` each release.
+3. **GitHub** — `./gitsync.sh` from the repo root.
+4. **Production (`.54`, `.55`, `.53`, `.57`)** — Ansible from `.16`: `~/ansible/pi-fleet/camera_upgrade.sh -a`
+
+Restart the agent on Study after changes if the running process must reload Python code.
 
 ---
 

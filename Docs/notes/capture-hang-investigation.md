@@ -304,7 +304,7 @@ Logs: `ENCODE_ACTIVE`, evictions climbing (~60k–74k), `Watchdog: ✓ All healt
 - **Code:** `ENCODE_ONLY_SOAK = True` fleet-wide in `config.py` v**1.1.27** (`d0ce170`).
 - **Runtime:** All 5 nodes in encode-only mode; motion detection and event pipeline **disabled** (no security events, no NFS transfers from new motion).
 - **Health:** ~2h stable on all nodes; Grafana encode columns populated on every camera.
-- **Workflow:** Develop on Study `.21` → `./gitsync.sh` → Ansible `camera_upgrade.sh -a` on `.54/.55/.53/.57`.
+- **Workflow:** Develop on Study (`.21`) via NFS-mounted working folder → bump `SYSTEM_VERSION` → `./gitsync.sh` → Ansible `camera_upgrade.sh -a` on `.16` for `.54/.55/.53/.57` only. See `Docs/DEPLOYMENT.md`.
 - **Not done yet:** Soak duration (target 48–72h); restore full pipeline; prove stability under motion + capture + encode.
 
 ### Success criteria — encode-only soak (experiment complete)
@@ -372,14 +372,13 @@ Priority order (incremental, one change at a time; Study `.21` first, then fleet
    - Ansible deploy to fleet; same monitoring window.
 
 5. **Fleet rollout**  
-   - `ENCODE_ONLY_SOAK = False` in `config.py` default once Study + one production node prove stable.  
-   - Bump `SYSTEM_VERSION`; `gitsync.sh` + Ansible.
+   - Change defaults in `config.py`; bump `SYSTEM_VERSION`; `./gitsync.sh` → Ansible on `.54/.55/.53/.57`. Study picks up code via NFS (no Ansible). See `Docs/DEPLOYMENT.md`.
 
 ### Phase C — Monitoring / ops (ongoing)
 
 - Grafana: encode columns remain useful even in full mode if we export H264 buffer health on all nodes (not only soak).
 - Reboot watchdog pause warnings are expected until pause timers expire — unrelated to soak health.
-- Study stays out of `cameras.ini` by design; document manual `git pull` + restart after Ansible fleet deploy.
+- Study is excluded from `cameras.ini` by design; code sync is via the NFS dev mount, not Ansible.
 
 ### What we are **not** pursuing (unless soak fails)
 
