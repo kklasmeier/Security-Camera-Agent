@@ -1,10 +1,11 @@
 # Capture hang investigation
 
-**Status:** Active — Phase B fleet rollout (v1.1.28)  
+**Status:** Active — Phase B deployed; **monitoring period** (v1.1.31)  
 **Started:** 2026-06-07  
-**Current version:** `1.1.28` — in-process recovery + lores capture @ 1.0s  
+**Current version:** `1.1.31` — full pipeline + 5 min recovery + 48 MB buffer + lores A/B @ 640×480  
 **Fleet:** 5× Pi Zero 2 W WiFi camera nodes (PiCam-Study, Back, MBR, MBR2, Outside)  
-**Monitoring:** Grafana `camera-fleet-health` on 192.168.1.16  
+**Monitoring:** Grafana `camera-fleet-health` on 192.168.1.16 (`from=now-24h&to=now`)  
+**Deploy workflow:** See `Docs/DEPLOYMENT.md` (Study = NFS dev mount; production = Ansible)
 
 ---
 
@@ -43,7 +44,7 @@ Everything below runs inside **one process**: `security-camera-agent.service` �
 | # | Name (systemd log) | Component | Touches `picam2`? | What it does |
 |---|-------------------|-----------|-------------------|--------------|
 | — | Main | `sec_cam_main.py` | Init only | Startup/shutdown orchestration; sleeps until SIGTERM |
-| 1 | `PictureCapture` | `circular_buffer._capture_pictures` | **YES — continuous** | Loop: `capture_array()` every ~0.5s → update two-frame buffer → hash frame. Also owns H264 encoder started at init. |
+| 1 | `PictureCapture` | `circular_buffer._capture_pictures` | **YES — continuous** | Loop: `capture_array("lores")` every **1.0s** → YUV→RGB → two-frame buffer → lightweight hash. Main stream H264 encode only. |
 | 2 | `MotionDetector` | `motion_detector._detection_loop` | No (reads buffer) | Copies downscaled prev/curr frames from buffer; pixel-diff motion; creates event on central API; signals Thread 3 |
 | 3 | `EventProcessor` | `event_processor._process_event` | **No** (reads buffer) | On signal: `save_event_still()` from picture buffer (A) → thumbnail → wait 4s → buffer still (B) → dump H264 from circular buffer |
 | 4 | `CameraControlAPI` | Flask in `camera_control_api.py` | Indirect | HTTP control (port 5000): start/stop MJPEG stream, config. Flask `threaded=True` — request handlers run in worker threads |
@@ -85,7 +86,7 @@ Legacy path: `capture_color_still()` remains in code; set `USE_BUFFERED_EVENT_ST
 ### Discussion notes (2026-06-07)
 
 - Motion detector keeps comparing **stale** prev/curr when Thread 1 hangs — checks continue, scores stay 0.
-- A/B from buffer trades ISP JPEG for software JPEG (same 1280×720 pixels); config flag allows rollback.
+- A/B from buffer trades ISP JPEG for software JPEG from **lores stream** (currently **640×480, 4:3** — see [A/B still quality](#ab-still-quality-deferred) below). Config flag `USE_BUFFERED_EVENT_STILLS` allows rollback to `capture_file()`.
 - MJPEG streaming only changes capture **interval** (`start_streaming()` / `stop_streaming()`), not separate picam2 calls from the HTTP thread.
 
 ---
@@ -133,47 +134,44 @@ Legacy path: `capture_color_still()` remains in code; set `USE_BUFFERED_EVENT_ST
 
 ---
 
-### 2. No in-process recovery when `capture_array()` blocks (**high priority — top open item**)
+### 2. No in-process recovery when `capture_array()` blocks — **addressed** (v1.1.28)
 
 **Hypothesis:** Hangs are invisible to `except Exception`; the thread blocks forever until external reboot.
 
-- Code comments acknowledge `capture_array()` can hang (`circular_buffer.py` ~516).
-- `system_watchdog.py` detects hung state and logs diagnostics but **does not restart** camera or agent.
-- Reboot watchdog waits **60 minutes** before full Pi reboot (now working after `e6b2a70`).
+**Fix shipped (2026-06-09, v1.1.28):**
 
-**Fix directions (to discuss):**
+- `system_watchdog`: NoFrames or hung `CALLING_CAPTURE_ARRAY` ≥ **5 min** → log + `os._exit(1)` → systemd `Restart=always`
+- Rate limit: 3 recoveries/hour, 10 min cooldown; skips recovery during livestream
+- Pi reboot watchdog unchanged at **60 min** (last resort)
+- Event history: `var/agent-event-history.json`; exported to Prometheus/Grafana (v1.1.29)
 
-- [ ] Watchdog triggers `circular_buffer.stop()` + `start()` after N minutes hung
-- [ ] Or `systemctl restart security-camera-agent` after shorter threshold (e.g. 5 min)
-- [ ] Keep full reboot as last resort after agent restart fails
+**Validated:** PiCam-Back hung ~5 min post–Phase B deploy (2026-06-09 ~1:26–1:31 PM); agent self-recovered without Pi reboot.
 
-**Files:** `system_watchdog.py`, possibly `sec_cam_main.py`
+**Files:** `system_watchdog.py`, `config.py`, `local_health.py`, `scripts/pi_health_export.sh`
 
 ---
 
-### 3. H264 encoder + full-res capture load on Pi Zero 2 W (medium priority)
+### 3. H264 encoder + capture load on Pi Zero 2 W — **partially addressed**
 
-**Hypothesis:** Simultaneous H264 circular buffer encoding and full RGB888 `capture_array()` stress Pi Zero–specific encoder paths.
+**Hypothesis:** Simultaneous H264 encode and `capture_array()` stress Pi Zero–specific paths.
 
-Concurrent load:
+**Mitigations shipped:**
 
-- `H264Encoder` → circular buffer (continuous)
-- `capture_array()` at 1280×720 RGB888 (~2.7 MB/frame; config `VIDEO_RESOLUTION`)
-- SHA256 hash of every frame (`frame.tobytes()`)
-- ~~Occasional `capture_file()` for event stills~~ removed in `5001b50`
+| Change | Version | Notes |
+|--------|---------|--------|
+| Lores capture (main encode-only) | pre-soak | `USE_LORES_CAPTURE = True`; hangs can still occur on lores path |
+| Capture interval 1.0s | v1.1.28 | Was 0.5s |
+| Lightweight frame fingerprint | v1.1.30 | 32×24 subsample hash; removed full-frame SHA256 |
+| H264 buffer 48 MB / 2000 chunks | v1.1.30 | Was 60 MB / 2500 |
+| Removed periodic `gc.collect()` | v1.1.30 | Capture + motion loops |
 
-Upstream references:
+**Still open:**
 
-- picamera2 #858 — Pi Zero encoder stop/hang with threads
-- picamera2 #1228 — encoder can freeze silently under certain scene/bitrate conditions
+- [ ] Raise lores to **1024×576 (16:9)** for A/B quality — deferred; see below
+- [ ] Review hang rate over 7+ days before further load changes
+- [ ] Tier 3 architecture (no periodic `capture_array`) if recovery frequency unacceptable
 
-**Fix directions (to discuss):**
-
-- [ ] Lower still-capture resolution or use lores stream for motion
-- [ ] Review `VIDEO_BITRATE` / encoder settings per node
-- [ ] Reduce hash frequency or use lighter fingerprint (not every frame)
-
-**Files:** `circular_buffer.py`, `config.py`
+**Files:** `circular_buffer.py`, `config.py`, `motion_detector.py`
 
 ---
 
@@ -203,8 +201,8 @@ When capture hangs:
 |-------|--------|
 | Central API failure treated as healthy | Fixed — local-first health |
 | `systemctl reboot` auth failure on `pi` | Fixed — `/sbin/reboot` |
-| No in-process camera restart | Open |
-| 60 min threshold before any recovery | Open — may be too long |
+| No in-process camera restart | **Fixed** — 5 min agent restart (v1.1.28) |
+| 60 min threshold before any recovery | **Tiered** — 5 min agent, 60 min Pi reboot |
 | PiCam-Study watchdog still `User=root` | Open — fleet inconsistency |
 | Ansible deploy: Outside watchdog restart sudo timeout | Observed 2026-06-07 — manual fix |
 
@@ -225,11 +223,12 @@ When capture hangs:
 
 1. ~~**Lock vs pause:** Is a global `picam2_lock` enough, or should event stills pause the capture loop entirely?~~ **Resolved:** buffer stills eliminate EventProcessor picam2 calls; lock not needed for now.
 2. ~~**Still quality:** Can A/B images come from the two-frame buffer instead of `capture_file()`?~~ **Resolved:** yes, deployed `5001b50`; watch image quality on next events.
-3. **Recovery tiering:** Agent restart at 5 min, Pi reboot at 60 min — acceptable?
+3. ~~**Recovery tiering:** Agent restart at 5 min, Pi reboot at 60 min — acceptable?~~ **Shipped** v1.1.28; monitoring hang/recovery rate.
 4. **Repro:** Can we trigger hang on Study with deliberate concurrent capture under load? (Less relevant post-`5001b50`; focus on idle/encoder-only hangs.)
 5. **Study node:** Align watchdog unit to `User=pi` like the rest of the fleet?
 6. **Motion on stale frames:** Should motion detector pause when `last_frame_time` is stale?
-7. **Fleet validation:** Does hang rate drop after `5001b50` on motion-heavy nodes (Outside, Back)?
+7. ~~**Fleet validation:** Does hang rate drop after `5001b50`?~~ Ongoing — lores + Phase B; Back hung once, recovery worked.
+8. **A/B still resolution:** Raise lores to 1024×576 after monitoring window — see deferred plan below.
 
 ---
 
@@ -299,90 +298,125 @@ Logs: `ENCODE_ACTIVE`, evictions climbing (~60k–74k), `Watchdog: ✓ All healt
 3. **Lores experiment:** Reduced main-stream contention — **hangs persisted** on MBR2/Outside.
 4. **Encode-only soak:** Remove capture/motion/events entirely to test whether H264 encode alone is the failure mode.
 
-### Where we are now (2026-06-07 evening)
+### Where we are now (2026-06-09)
 
-- **Code:** `ENCODE_ONLY_SOAK = True` fleet-wide in `config.py` v**1.1.27** (`d0ce170`).
-- **Runtime:** All 5 nodes in encode-only mode; motion detection and event pipeline **disabled** (no security events, no NFS transfers from new motion).
-- **Health:** ~2h stable on all nodes; Grafana encode columns populated on every camera.
-- **Workflow:** Develop on Study (`.21`) via NFS-mounted working folder → bump `SYSTEM_VERSION` → `./gitsync.sh` → Ansible `camera_upgrade.sh -a` on `.16` for `.54/.55/.53/.57` only. See `Docs/DEPLOYMENT.md`.
-- **Not done yet:** Soak duration (target 48–72h); restore full pipeline; prove stability under motion + capture + encode.
+- **Code:** v**1.1.31** fleet-wide (Study via NFS; .54/.55/.57 via Ansible; MBR2 offline intermittently).
+- **Runtime:** Full pipeline — lores capture @ 1.0s, motion, events, H264 buffer (48 MB / 2000 chunks), 5 min agent recovery.
+- **Encode-only soak:** Complete (~40h clean on 4/5 nodes); encode path ruled out as primary failure mode.
+- **Hang behavior:** Capture hangs still occur on lores path; **in-process recovery validated** on Back (~5 min outage, no Pi reboot).
+- **Grafana:** Hang/recovery event panels + `Agent up/down timeline`; fleet table shows Hangs/Recoveries (24h).
+- **A/B stills:** 640×480 (4:3) from lores buffer; **color fix** BGR→RGB shipped v1.1.31; **resolution/aspect upgrade deferred** — see below.
+- **Video:** Unchanged at 1280×720 H264 (16:9) — quality fine.
 
-### Success criteria — encode-only soak (experiment complete)
+### Current config snapshot (v1.1.31)
 
-Call the soak **successful** when **all** of the following hold for **48–72 hours** on **all 5 nodes**:
+| Setting | Value |
+|---------|--------|
+| `ENCODE_ONLY_SOAK` | `False` |
+| `USE_LORES_CAPTURE` | `True` |
+| `LORES_RESOLUTION` | `(640, 480)` — **4:3** |
+| `VIDEO_RESOLUTION` | `(1280, 720)` — 16:9 encode |
+| `PICTURE_CAPTURE_INTERVAL` | `1.0` s |
+| `CIRCULAR_BUFFER_MAX_BYTES` | 48 MB |
+| `CIRCULAR_BUFFER_MAX_CHUNKS` | 2000 |
+| `AGENT_RECOVERY_HANG_THRESHOLD_MINUTES` | 5 |
+| `THUMBNAIL_SIZE` | `(240, 180)` — **4:3** (should match still aspect when upgraded) |
+| `USE_BUFFERED_EVENT_STILLS` | `True` |
 
-| Criterion | Target |
-|-----------|--------|
-| `camera_agent_healthy` | 1 continuously |
-| `encode_only_soak` | 1 |
-| Enc chunks | ~2500 (buffer full), evictions increasing |
-| Enc stale (s) | < 60s always; never `NoEncode` > 2m |
-| NoFrames | 0 (N/A in soak — no capture) |
-| Agent restarts | None required for hang recovery |
-| Pi reboots | None triggered by hang watchdog |
+### Success criteria — encode-only soak (**complete**)
 
-If any node hits `NoEncode` or needs restart during the window, note time-to-failure and node identity — still useful data, but soak is not “clean success.”
+Soak passed on reachable nodes (~40h, encode stale max 4s). MBR2 had WiFi gaps, not encode failures.
 
-### Success criteria — return to full functionality (production ready)
+### Success criteria — return to full functionality (**in progress**)
 
-Call **stability restored** when the **full pipeline** runs on all 5 nodes for **7+ days** with:
+Target: **7+ days** full pipeline on all nodes with:
 
-| Criterion | Target |
-|-----------|--------|
-| Motion detection | Active; events created on central server |
-| Event stills + H264 clips | A/B from buffer + buffer dump (keep `5001b50`) |
-| `camera_agent_healthy` | 1; NoFrames = 0 |
-| Hang recovery | In-process agent/camera restart < 5 min (not 60 min Pi reboot) |
-| No manual intervention | No ad-hoc SSH restarts for capture hangs |
+| Criterion | Target | Status |
+|-----------|--------|--------|
+| Motion detection + events | Active on central server | ✅ Events flowing |
+| A/B + H264 from buffer | Buffered stills + clip dump | ✅ Working; A/B quality TBD |
+| `camera_agent_healthy` | 1; NoFrames = 0 | ⏳ Monitoring; recoveries expected |
+| Hang recovery | < 5 min, no manual SSH | ✅ Validated once (Back) |
+| Recovery frequency | Rare (not daily per node) | ⏳ **Watch 7+ days** before more changes |
+| No Pi reboots for hangs | Agent recovery sufficient | ⏳ Monitoring |
 
 ---
 
-## Suggested path forward (as of 2026-06-07)
+## A/B still quality (deferred)
 
-Assuming encode-only soak completes successfully (encode path is not the primary failure):
+**Purpose:** Picture A at motion trigger; Picture B **4 seconds later**. Quality should be **decent** — useful for identifying people/objects at the event. Video clip (H264) remains the primary forensic record; A/B are quick reference stills.
 
-### Phase A — Finish soak (now → 48–72h)
+### What happened to A/B size over time
 
-- [ ] Leave `ENCODE_ONLY_SOAK = True` on all nodes; monitor Grafana (`from=now-24h&to=now`).
-- [ ] Record first failure (if any): node, uptime, Enc stale, central log excerpt.
-- [ ] Document soak end time and outcome in session log below.
+| Era | Source | Typical size | Aspect | Notes |
+|-----|--------|--------------|--------|--------|
+| Pre-lores / ISP path | `capture_file()` or main stream | **1024×576** or 1280×720 | **16:9** | Sunday 2026-06-08 samples; good width match to video |
+| Current (lores buffer) | `LORES_RESOLUTION` → `save_buffered_still()` | **640×480** | **4:3** | ~2026-06-09; smaller; looks distorted if UI stretches to 16:9 |
 
-### Phase B — Re-introduce capture without losing encode stability
+Measured from event JPEGs: Sunday **1024×576**; today **640×480**.
 
-Priority order (incremental, one change at a time; Study `.21` first, then fleet):
+### Color issue (fixed v1.1.31)
 
-1. **In-process hang recovery (do before re-enabling capture on fleet)**  
-   - Watchdog: if `CALLING_CAPTURE_ARRAY` > 5 min → `systemctl restart security-camera-agent` (or circular_buffer stop/start).  
-   - Keep Pi reboot at 60 min as last resort.  
-   - *Why first:* Full pipeline will hang again without this; soak proved encode is fine but capture will still block in libcamera.
+OpenCV lores path stores frames in **BGR** order; PIL saved as RGB → red/blue swap (red playground → blue, etc.). Fixed via `_frame_rgb_for_jpeg()` (same as MJPEG stream). Events after v1.1.31 deploy should have correct colors.
 
-2. **Re-enable picture capture on one node (Study)**  
-   - Set `ENCODE_ONLY_SOAK = False` in Study `config_local.py` only; keep `USE_LORES_CAPTURE = True`.  
-   - Watch 48h: NoFrames vs encode metrics (if we add buffer metrics on non-soak path).  
-   - If hang returns → capture path confirmed; tune recovery + consider capture changes below.
+### Planned fix — **Option B: match Sunday** (not implemented yet)
 
-3. **Capture load reduction (if hangs return on lores)**  
-   - Slower picture interval (e.g. 1.0s vs 0.5s).  
-   - Keep lores for `capture_array` (already separates from main encode).  
-   - Optional: lighter frame fingerprint than SHA256 every frame.  
-   - Do **not** re-add EventProcessor `capture_file()` — keep buffered stills.
+**Decision (2026-06-09):** After monitoring period, raise lores to match Sunday quality without reverting to event-time `capture_file()` (concurrent picam2 risk).
 
-4. **Re-enable motion + events (after capture stable 48h+ on Study)**  
-   - Motion detector + EventProcessor on Study; verify events and NFS transfers.  
-   - Ansible deploy to fleet; same monitoring window.
+| Config change | From | To | Rationale |
+|---------------|------|-----|-----------|
+| `LORES_RESOLUTION` | `(640, 480)` | **`(1024, 576)`** | 16:9; matches Sunday samples; ~2.7× more pixels than 640×480 |
+| `THUMBNAIL_SIZE` | `(240, 180)` 4:3 | **`(320, 180)`** 16:9 | Thumbnail stays small but matches still aspect |
 
-5. **Fleet rollout**  
-   - Change defaults in `config.py`; bump `SYSTEM_VERSION`; `./gitsync.sh` → Ansible on `.54/.55/.53/.57`. Study picks up code via NFS (no Ansible). See `Docs/DEPLOYMENT.md`.
+**Why not implement now:** Fleet just entered Phase B + recovery + buffer/hash + color fixes. Want **7+ days** of Grafana/log data (hang rate, recovery count, stability) before adding lores pixel load.
 
-### Phase C — Monitoring / ops (ongoing)
+**When to implement:** After monitoring window; bump `SYSTEM_VERSION`; `./gitsync.sh` → Ansible. Watch `Agent up/down timeline` and recovery counts for regression.
 
-- Grafana: encode columns remain useful even in full mode if we export H264 buffer health on all nodes (not only soak).
-- Reboot watchdog pause warnings are expected until pause timers expire — unrelated to soak health.
-- Study is excluded from `cameras.ini` by design; code sync is via the NFS dev mount, not Ansible.
+**Alternatives rejected for now:**
 
-### What we are **not** pursuing (unless soak fails)
+- **640×360** — fixes aspect only, still smaller than Sunday
+- **1280×720 lores** — best quality, highest hang risk
+- **Upscale on save** — fake resolution, no real detail
+- **Event-only `capture_file()`** — best ISP color/size but reintroduces concurrent picam2 access (`5001b50` regression)
 
-- If encode-only **also** hangs → investigate encoder/libcamera/OS (bitrate, keyframe interval, thermal, PSU). Soak would falsify the “capture-only” hypothesis.
+---
+
+## Suggested path forward (updated 2026-06-09)
+
+### Phase A — Encode soak — **complete**
+
+- [x] 48–72h encode-only soak on reachable nodes
+- [x] Conclusion: encode-only stable; capture path is the failure mode
+
+### Phase B — Full pipeline + recovery — **deployed**
+
+- [x] In-process recovery (~5 min) fleet-wide (v1.1.28)
+- [x] `ENCODE_ONLY_SOAK = False` fleet-wide
+- [x] Capture interval 1.0s; lores capture
+- [x] Buffer 48 MB; lightweight hash (v1.1.30)
+- [x] A/B color fix BGR→RGB (v1.1.31)
+- [x] Hang/recovery Grafana metrics (v1.1.29)
+- [x] Deploy workflow documented (`Docs/DEPLOYMENT.md`)
+
+### Phase C — Monitoring period (**now → ~7 days**)
+
+- [ ] Grafana: `Agent up/down timeline`, Hang/Recovery event charts, fleet table counts
+- [ ] Track recovery frequency per node (target: not daily)
+- [ ] Confirm A/B colors correct on post–v1.1.31 events
+- [ ] Note any hangs correlated with motion events (Back hung ~1 min after event 27286)
+- [ ] MBR2: deploy when WiFi returns; include in stats
+
+### Phase D — A/B still resolution (**deferred**)
+
+- [ ] `LORES_RESOLUTION = (1024, 576)`
+- [ ] `THUMBNAIL_SIZE = (320, 180)` (16:9)
+- [ ] Verify next events match Sunday size/aspect; compare hang rate before/after
+
+### Phase E — Long-term (only if needed)
+
+- [ ] If recovery frequency too high → Tier 3 (architecture without periodic `capture_array`)
+- [ ] Study watchdog `User=pi` alignment
+- [ ] Motion detector pause on stale frames
 
 ### 2026-06-09 — Phase B fleet rollout (v1.1.28)
 
@@ -395,6 +429,39 @@ Priority order (incremental, one change at a time; Study `.21` first, then fleet
 3. **Slower capture** — `PICTURE_CAPTURE_INTERVAL = 1.0s` (was 0.5s); lores capture unchanged.
 
 **Monitor:** `camera_agent_healthy`, NoFrames, agent restart count in logs, motion events on central server.
+
+### 2026-06-09 — Monitoring + optimization + A/B quality (v1.1.29–v1.1.31)
+
+**Hang/recovery visibility (v1.1.29):**
+
+- `agent-event-history.json` records down/up transitions
+- Prometheus: `camera_agent_hang_events_total`, `camera_agent_recovery_events_total`, last-event timestamps
+- Grafana: Hang & recovery event row, `Agent up/down timeline`, fleet table columns
+
+**Load reduction (v1.1.30):**
+
+- H264 buffer 60 MB → **48 MB**; chunks 2500 → **2000**
+- SHA256 every frame → **32×24 lightweight fingerprint**
+- Removed forced `gc.collect()` in capture/motion loops
+- Motion wait/cooldown poll aligned to 1.0s
+- Streaming health check: `/api/health` (was 404 on `/streaming/status`)
+
+**A/B color fix (v1.1.31):**
+
+- `_frame_rgb_for_jpeg()`: BGR→RGB before PIL JPEG (red/blue swap on lores stills)
+- Deployed fleet-wide commit `1dd143f`
+
+**Back hang + recovery (2026-06-09 ~1:26–1:31 PM):**
+
+- NoFrames 1m→4m; `HUNG in capture_array() for 204.7s`; motion scores 0 on stale frames
+- Agent recovery at ~5 min; systemd restart; **no Pi reboot**
+- Correlated with motion event ~1:25 PM (video transfer) — timing noted, not proven causal
+
+**A/B resolution regression identified (2026-06-09):**
+
+- Sunday events: **1024×576** (16:9); today: **640×480** (4:3) from `LORES_RESOLUTION`
+- 4:3 stills look distorted when UI expects 16:9 (same as video)
+- **Planned (deferred):** `LORES_RESOLUTION = (1024, 576)`, `THUMBNAIL_SIZE = (320, 180)` after 7-day monitoring window
 
 ---
 

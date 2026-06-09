@@ -334,24 +334,21 @@ class SecurityCameraSystem:
             log("="*60, level="INFO")
             log("Active Components:", level="INFO")
             log("  ✓ API Client (registered with central server)", level="INFO")
+            log("  ✓ MJPEG Server (live stream)", level="INFO")
             if config.ENCODE_ONLY_SOAK:
                 log("  ✓ Circular Buffer (encode-only soak — H264 buffer only)", level="INFO")
                 log("  ✓ Transfer Manager (transferring files to NFS)", level="INFO")
                 log("  ○ Motion Detector (disabled for soak)", level="INFO")
                 log("  ○ Event Processor (disabled for soak)", level="INFO")
+                log("", level="INFO")
+                log("NOTE: Encode-only soak — monitor H264 buffer chunk advancement in Grafana", level="INFO")
             else:
                 log("  ✓ Circular Buffer (capturing video)", level="INFO")
                 log("  ✓ Motion Detector (creating events on central server)", level="INFO")
                 log("  ✓ Event Processor (saving files to pending directory)", level="INFO")
                 log("  ✓ Transfer Manager (transferring files to NFS)", level="INFO")
-            log("", level="INFO")
-            if not config.ENCODE_ONLY_SOAK:
-                log("Inactive Components (pending migration):", level="WARNING")
-                log("  ⚠ MJPEG Server (Future session)", level="WARNING")
                 log("", level="INFO")
                 log("NOTE: Full pipeline active → Motion detected → Events created → Files saved → Transferred to NFS", level="INFO")
-            else:
-                log("NOTE: Encode-only soak — monitor H264 buffer chunk advancement in Grafana", level="INFO")
             log("", level="INFO")
             log("Press Ctrl+C to stop", level="INFO")
             log("="*60, level="INFO")
@@ -360,9 +357,9 @@ class SecurityCameraSystem:
             print("✓ Security Camera System Running")
             print("="*60)
             if config.ENCODE_ONLY_SOAK:
-                print("Active: Encode-only soak (H264 buffer), File Transfers")
+                print("Active: Encode-only soak (H264 buffer), MJPEG stream, File Transfers")
             else:
-                print("Active: Camera, Motion Detection, Event Processing, File Transfers")
+                print("Active: Camera, Motion Detection, Event Processing, MJPEG stream, File Transfers")
                 print("✓ Files automatically transferred to NFS")
             print("Press Ctrl+C to stop")
             print("="*60 + "\n")
