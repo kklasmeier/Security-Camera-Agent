@@ -16,10 +16,11 @@ import subprocess
 import shutil
 import psutil
 import os
+import json
 from datetime import datetime, timedelta
 from logger import log
 from config import config
-from local_health import write_local_health_status
+from local_health import write_local_health_status, noframes_minutes_from_issues, noencode_minutes_from_issues
 
 
 class SystemWatchdog:
@@ -81,6 +82,10 @@ class SystemWatchdog:
         # Freeze detection tracking (prevent diagnostic spam)
         self.last_freeze_diagnostic_time = 0
         self.freeze_diagnostic_interval = 300  # Only capture diagnostics every 5 minutes
+
+        # Agent recovery (in-process hang recovery via systemd restart)
+        self._recovery_lock = threading.Lock()
+        self._recovery_in_progress = False
         
         log("SystemWatchdog initialized")
     
@@ -182,6 +187,7 @@ class SystemWatchdog:
                     level="INFO")
 
         self._write_local_health_status(issues, thread_status)
+        self._maybe_trigger_agent_recovery(issues)
     
     def _write_local_health_status(self, issues, thread_status):
         """Write local health JSON for reboot watchdog (local-first hang detection)."""
@@ -224,6 +230,138 @@ class SystemWatchdog:
             write_local_health_status(config.LOCAL_HEALTH_STATUS_FILE, status)
         except Exception as e:
             log(f"Watchdog: Failed to write local health status: {e}", level="WARNING")
+
+    def _load_recovery_history(self):
+        """Load recent agent recovery timestamps from disk."""
+        path = config.AGENT_RECOVERY_HISTORY_FILE
+        try:
+            with open(path, 'r') as f:
+                data = json.load(f)
+            return [float(ts) for ts in data.get('recoveries', [])]
+        except (FileNotFoundError, json.JSONDecodeError, TypeError, ValueError):
+            return []
+
+    def _record_recovery_attempt(self):
+        """Append recovery timestamp, pruning entries older than 24h."""
+        path = config.AGENT_RECOVERY_HISTORY_FILE
+        now = time.time()
+        recoveries = [ts for ts in self._load_recovery_history() if now - ts < 86400]
+        recoveries.append(now)
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp_path = path + '.tmp'
+            with open(tmp_path, 'w') as f:
+                json.dump({'recoveries': recoveries}, f, indent=2)
+            os.replace(tmp_path, path)
+        except Exception as e:
+            log(f"Watchdog: Failed to record recovery history: {e}", level="WARNING")
+
+    def _recovery_rate_limited(self):
+        """Return True if another recovery attempt is allowed."""
+        now = time.time()
+        recoveries = self._load_recovery_history()
+        recent_hour = [ts for ts in recoveries if now - ts < 3600]
+        if len(recent_hour) >= config.AGENT_RECOVERY_MAX_PER_HOUR:
+            return True
+        if recoveries and now - recoveries[-1] < config.AGENT_RECOVERY_COOLDOWN_SECONDS:
+            return True
+        return False
+
+    def _is_streaming_active(self):
+        """Check Camera Control API streaming status (skip recovery during livestream)."""
+        if not config.AGENT_RECOVERY_CHECK_STREAMING:
+            return False
+        try:
+            import requests
+            response = requests.get(
+                f"{config.CAMERA_CONTROL_API_BASE}/streaming/status",
+                timeout=5,
+            )
+            if response.status_code == 200:
+                return bool(response.json().get('streaming', False))
+        except Exception as e:
+            log(f"Watchdog: Could not check streaming status: {e}", level="DEBUG")
+        return False
+
+    def _hang_minutes_for_recovery(self, issues, cb_health):
+        """Compute hang duration in minutes for recovery decisions."""
+        encode_only = cb_health.get('encode_only_soak', self.encode_only_soak)
+        threshold_seconds = config.AGENT_RECOVERY_HANG_THRESHOLD_MINUTES * 60
+
+        if encode_only:
+            minutes = noencode_minutes_from_issues(issues)
+            if minutes == 0:
+                minutes = int(cb_health.get('encode_stale_seconds', 0) or 0) // 60
+            return minutes
+
+        minutes = noframes_minutes_from_issues(issues)
+        if minutes == 0 and cb_health.get('last_frame_time'):
+            minutes = int(max(0, time.time() - cb_health['last_frame_time']) // 60)
+
+        thread_state = cb_health.get('thread_state', '')
+        time_in_state = cb_health.get('time_in_current_state', 0) or 0
+        if thread_state == "CALLING_CAPTURE_ARRAY" and time_in_state >= threshold_seconds:
+            minutes = max(minutes, int(time_in_state // 60))
+
+        return minutes
+
+    def _maybe_trigger_agent_recovery(self, issues):
+        """
+        Restart agent via systemd when capture/encode hang exceeds threshold.
+
+        Uses os._exit() so systemd Restart=always brings the process back without sudo.
+        Pi reboot watchdog remains the last resort at 60 minutes.
+        """
+        if not config.AGENT_RECOVERY_ENABLED:
+            return
+
+        with self._recovery_lock:
+            if self._recovery_in_progress:
+                return
+
+            cb_health = self.circular_buffer.get_health()
+            hang_minutes = self._hang_minutes_for_recovery(issues, cb_health)
+            threshold = config.AGENT_RECOVERY_HANG_THRESHOLD_MINUTES
+
+            if hang_minutes < threshold:
+                return
+
+            if self._recovery_rate_limited():
+                log(
+                    f"Watchdog: Hang {hang_minutes}m >= {threshold}m but recovery "
+                    f"rate-limited (cooldown/max per hour)",
+                    level="WARNING",
+                )
+                return
+
+            if self._is_streaming_active():
+                log(
+                    f"Watchdog: Hang {hang_minutes}m detected but streaming active — "
+                    f"skipping agent recovery",
+                    level="WARNING",
+                )
+                return
+
+            self._recovery_in_progress = True
+
+        encode_only = cb_health.get('encode_only_soak', self.encode_only_soak)
+        hang_type = "NoEncode" if encode_only else "NoFrames"
+        thread_state = cb_health.get('thread_state', 'UNKNOWN')
+        reason = (
+            f"{hang_type} hang {hang_minutes}m (threshold {threshold}m, state={thread_state})"
+        )
+        log("=" * 60, level="ERROR")
+        log(f"AGENT RECOVERY: {reason}", level="ERROR")
+        log("Exiting process for systemd restart (Restart=always)", level="ERROR")
+        log("=" * 60, level="ERROR")
+
+        self._record_recovery_attempt()
+
+        def _exit_for_restart():
+            time.sleep(1.0)  # Allow log batch flush
+            os._exit(1)
+
+        threading.Thread(target=_exit_for_restart, name="AgentRecoveryExit", daemon=True).start()
     
     def _detailed_health_report(self):
         """

@@ -163,7 +163,7 @@ class Config:
         
         # How often to capture full-resolution frames for motion detection (seconds)
         # These frames are used for both motion comparison AND saving as Picture A/B
-        self.PICTURE_CAPTURE_INTERVAL = 0.5
+        self.PICTURE_CAPTURE_INTERVAL = 1.0
         
         # Event stills (Picture A/B): save from picture buffer instead of picam2 still capture.
         # Avoids concurrent capture_file/capture_array during H264 encoding (stability).
@@ -179,9 +179,8 @@ class Config:
         self.LORES_RESOLUTION = (640, 480)
 
         # Encode-only soak experiment: continuous H264 encode, no capture_array/motion/events.
-        # Fleet-wide soak to compare encode stability vs prior lores/capture hangs.
-        # Set False in config_local.py to revert a single node to full pipeline.
-        self.ENCODE_ONLY_SOAK = True
+        # Disabled fleet-wide after soak validated encode path (v1.1.28 Phase B).
+        self.ENCODE_ONLY_SOAK = False
         self.ENCODE_STALE_THRESHOLD_SECONDS = 120
         
         # JPEG quality for saved images (1-100)
@@ -207,6 +206,14 @@ class Config:
         # ====================================================================
         # Automatic camera reboot on hang detection
         
+        # In-process agent recovery (system_watchdog → systemd restart before Pi reboot)
+        self.AGENT_RECOVERY_ENABLED = True
+        self.AGENT_RECOVERY_HANG_THRESHOLD_MINUTES = 5     # NoFrames / hung capture → restart agent
+        self.AGENT_RECOVERY_COOLDOWN_SECONDS = 600         # 10 minutes between recovery attempts
+        self.AGENT_RECOVERY_MAX_PER_HOUR = 3
+        self.AGENT_RECOVERY_CHECK_STREAMING = True
+        self.AGENT_RECOVERY_HISTORY_FILE = os.path.join(self.VAR_PATH, "agent-recovery-history.json")
+
         # Core timing
         self.REBOOT_WATCHDOG_CHECK_INTERVAL = 300          # 5 minutes between checks
         self.REBOOT_WATCHDOG_HANG_THRESHOLD = 60           # Trigger reboot after 60m of NoFrames
@@ -337,7 +344,7 @@ class Config:
         # Capture interval modes
         # PICTURE_CAPTURE_INTERVAL is the "active" interval used by circular buffer
         # It switches between NORMAL and STREAMING modes based on streaming state
-        self.NORMAL_CAPTURE_INTERVAL = 0.5      # Normal motion detection mode
+        self.NORMAL_CAPTURE_INTERVAL = 1.0      # Normal motion detection mode
         self.STREAMING_CAPTURE_INTERVAL = 0.1   # Fast mode during livestream (10fps)
         
         # Streaming timeout and safety limits
@@ -345,9 +352,9 @@ class Config:
         self.STREAM_MAX_DURATION_SECONDS = 1800 # Maximum stream duration (30 minutes)
 
         # System version (semantic versioning)
-        self.SYSTEM_VERSION = "1.1.27"
+        self.SYSTEM_VERSION = "1.1.28"
 
-        # Note: PICTURE_CAPTURE_INTERVAL remains at 0.5s as default
+        # Note: PICTURE_CAPTURE_INTERVAL is the default normal capture interval
         # When streaming starts, it's changed to STREAMING_CAPTURE_INTERVAL
         # When streaming stops, it's restored to NORMAL_CAPTURE_INTERVAL
         
