@@ -97,6 +97,32 @@ PY
     emit camera_agent_encode_healthy "$ENCODE_HEALTH"
   fi
 
+  EH="$CAMERA_AGENT/var/agent-event-history.json"
+  if [ -f "$EH" ]; then
+    read -r HANGS_TOTAL RECOV_TOTAL HANGS_24H RECOV_24H LAST_HANG_TS LAST_RECOV_TS <<< "$(python3 - "$EH" <<'PY'
+import json, sys, time
+from pathlib import Path
+sys.path.insert(0, "/home/pi/Security-Camera-Agent")
+from local_health import agent_event_stats
+stats = agent_event_stats(sys.argv[1])
+print(
+    stats["hang_events_total"],
+    stats["recovery_events_total"],
+    stats["hangs_last_24h"],
+    stats["recoveries_last_24h"],
+    int(stats["last_hang_timestamp"]),
+    int(stats["last_recovery_timestamp"]),
+)
+PY
+)"
+    emit camera_agent_hang_events_total "$HANGS_TOTAL"
+    emit camera_agent_recovery_events_total "$RECOV_TOTAL"
+    emit camera_agent_hangs_last_24h "$HANGS_24H"
+    emit camera_agent_recoveries_last_24h "$RECOV_24H"
+    [ "$LAST_HANG_TS" -gt 0 ] && emit camera_agent_last_hang_timestamp "$LAST_HANG_TS"
+    [ "$LAST_RECOV_TS" -gt 0 ] && emit camera_agent_last_recovery_timestamp "$LAST_RECOV_TS"
+  fi
+
   if curl -m 2 -sf http://192.168.1.26:8000/ >/dev/null 2>&1; then
     emit camera_central_api_reachable 1
   else

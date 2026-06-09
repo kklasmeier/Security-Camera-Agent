@@ -70,6 +70,69 @@ def hang_minutes_from_health(raw: Dict[str, Any]) -> int:
     return minutes
 
 
+def load_agent_events(path: str) -> List[Dict[str, Any]]:
+    """Load hang/recovery event history from JSON file."""
+    file_path = Path(path)
+    if not file_path.exists():
+        return []
+    try:
+        with open(file_path, 'r') as f:
+            data = json.load(f)
+        events = data.get('events', [])
+        return events if isinstance(events, list) else []
+    except (json.JSONDecodeError, TypeError, OSError):
+        return []
+
+
+def append_agent_event(
+    path: str,
+    kind: str,
+    detail: str,
+    retention_seconds: float = 604800,
+    ts: Optional[float] = None,
+) -> None:
+    """
+    Append a hang/recovery event to history (atomic write).
+
+    kind: 'down' (hang started) or 'up' (recovered)
+    """
+    event_ts = ts if ts is not None else time.time()
+    now = time.time()
+    events = load_agent_events(path)
+    events = [e for e in events if now - float(e.get('ts', 0)) < retention_seconds]
+    events.append({
+        'ts': event_ts,
+        'kind': kind,
+        'detail': detail,
+    })
+    file_path = Path(path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = file_path.with_suffix('.json.tmp')
+    with open(tmp_path, 'w') as f:
+        json.dump({'events': events}, f, indent=2)
+    tmp_path.replace(file_path)
+
+
+def agent_event_stats(path: str, window_seconds: float = 86400) -> Dict[str, Any]:
+    """Summarize hang/recovery events for Prometheus export."""
+    now = time.time()
+    events = load_agent_events(path)
+    downs = [e for e in events if e.get('kind') == 'down']
+    ups = [e for e in events if e.get('kind') == 'up']
+    downs_24h = [e for e in downs if now - float(e.get('ts', 0)) < window_seconds]
+    ups_24h = [e for e in ups if now - float(e.get('ts', 0)) < window_seconds]
+    last_down = max((float(e['ts']) for e in downs), default=0)
+    last_up = max((float(e['ts']) for e in ups), default=0)
+    return {
+        'hang_events_total': len(downs),
+        'recovery_events_total': len(ups),
+        'hangs_last_24h': len(downs_24h),
+        'recoveries_last_24h': len(ups_24h),
+        'last_hang_timestamp': last_down,
+        'last_recovery_timestamp': last_up,
+    }
+
+
 def write_local_health_status(path: str, status: Dict[str, Any]) -> None:
     """Atomically write local health status JSON."""
     file_path = Path(path)

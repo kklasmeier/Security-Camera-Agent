@@ -20,7 +20,13 @@ import json
 from datetime import datetime, timedelta
 from logger import log
 from config import config
-from local_health import write_local_health_status, noframes_minutes_from_issues, noencode_minutes_from_issues
+from local_health import (
+    write_local_health_status,
+    noframes_minutes_from_issues,
+    noencode_minutes_from_issues,
+    append_agent_event,
+    load_agent_events,
+)
 
 
 class SystemWatchdog:
@@ -86,6 +92,9 @@ class SystemWatchdog:
         # Agent recovery (in-process hang recovery via systemd restart)
         self._recovery_lock = threading.Lock()
         self._recovery_in_progress = False
+        self._in_hang_state = False
+        
+        self._migrate_legacy_recovery_history()
         
         log("SystemWatchdog initialized")
     
@@ -187,6 +196,7 @@ class SystemWatchdog:
                     level="INFO")
 
         self._write_local_health_status(issues, thread_status)
+        self._track_hang_recovery_events(issues)
         self._maybe_trigger_agent_recovery(issues)
     
     def _write_local_health_status(self, issues, thread_status):
@@ -230,6 +240,66 @@ class SystemWatchdog:
             write_local_health_status(config.LOCAL_HEALTH_STATUS_FILE, status)
         except Exception as e:
             log(f"Watchdog: Failed to write local health status: {e}", level="WARNING")
+
+    def _is_hang_issue(self, issues, cb_health):
+        """True when capture/encode pipeline is in a hang/degraded state."""
+        for issue in issues:
+            if issue.startswith(('NoFrames:', 'NoEncode:', 'FrozenFrames:', 'CameraFrozen:')):
+                return True
+        thread_state = cb_health.get('thread_state', '')
+        time_in_state = cb_health.get('time_in_current_state', 0) or 0
+        if thread_state == "CALLING_CAPTURE_ARRAY" and time_in_state > 60.0:
+            return True
+        if thread_state == "ENCODE_STALE":
+            return True
+        return False
+
+    def _hang_detail_from_issues(self, issues, cb_health):
+        """Short description for event history."""
+        for prefix in ('NoFrames:', 'NoEncode:', 'FrozenFrames:', 'CameraFrozen:'):
+            for issue in issues:
+                if issue.startswith(prefix):
+                    return issue
+        thread_state = cb_health.get('thread_state', '')
+        time_in_state = cb_health.get('time_in_current_state', 0) or 0
+        if thread_state == "CALLING_CAPTURE_ARRAY" and time_in_state > 60.0:
+            return f"HUNG:{thread_state}:{int(time_in_state)}s"
+        return issues[0] if issues else "unknown"
+
+    def _track_hang_recovery_events(self, issues):
+        """Record hang start (down) and natural recovery (up) transitions."""
+        cb_health = self.circular_buffer.get_health()
+        hang_now = self._is_hang_issue(issues, cb_health)
+        path = config.AGENT_EVENT_HISTORY_FILE
+        retention = config.AGENT_EVENT_HISTORY_RETENTION_SECONDS
+
+        try:
+            if hang_now and not self._in_hang_state:
+                detail = self._hang_detail_from_issues(issues, cb_health)
+                append_agent_event(path, 'down', detail, retention)
+                log(f"Watchdog: Hang event recorded (down): {detail}", level="WARNING")
+            elif not hang_now and self._in_hang_state:
+                append_agent_event(path, 'up', 'natural_recovery', retention)
+                log("Watchdog: Recovery event recorded (up): natural_recovery", level="INFO")
+        except Exception as e:
+            log(f"Watchdog: Failed to record hang/recovery event: {e}", level="WARNING")
+
+        self._in_hang_state = hang_now
+
+    def _migrate_legacy_recovery_history(self):
+        """Import timestamps from agent-recovery-history.json into event log once."""
+        path = config.AGENT_EVENT_HISTORY_FILE
+        retention = config.AGENT_EVENT_HISTORY_RETENTION_SECONDS
+        existing = load_agent_events(path)
+        existing_up = {float(e.get('ts', 0)) for e in existing if e.get('kind') == 'up'}
+        for ts in self._load_recovery_history():
+            if ts not in existing_up:
+                try:
+                    append_agent_event(
+                        path, 'up', 'agent_restart', retention, ts=ts,
+                    )
+                except Exception:
+                    pass
 
     def _load_recovery_history(self):
         """Load recent agent recovery timestamps from disk."""
@@ -356,6 +426,16 @@ class SystemWatchdog:
         log("=" * 60, level="ERROR")
 
         self._record_recovery_attempt()
+
+        try:
+            append_agent_event(
+                config.AGENT_EVENT_HISTORY_FILE,
+                'up',
+                reason,
+                config.AGENT_EVENT_HISTORY_RETENTION_SECONDS,
+            )
+        except Exception as e:
+            log(f"Watchdog: Failed to record recovery event: {e}", level="WARNING")
 
         def _exit_for_restart():
             time.sleep(1.0)  # Allow log batch flush

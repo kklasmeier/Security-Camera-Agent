@@ -213,6 +213,8 @@ class Config:
         self.AGENT_RECOVERY_MAX_PER_HOUR = 3
         self.AGENT_RECOVERY_CHECK_STREAMING = True
         self.AGENT_RECOVERY_HISTORY_FILE = os.path.join(self.VAR_PATH, "agent-recovery-history.json")
+        self.AGENT_EVENT_HISTORY_FILE = os.path.join(self.VAR_PATH, "agent-event-history.json")
+        self.AGENT_EVENT_HISTORY_RETENTION_SECONDS = 7 * 86400  # 7 days for Grafana history
 
         # Core timing
         self.REBOOT_WATCHDOG_CHECK_INTERVAL = 300          # 5 minutes between checks
@@ -352,7 +354,7 @@ class Config:
         self.STREAM_MAX_DURATION_SECONDS = 1800 # Maximum stream duration (30 minutes)
 
         # System version (semantic versioning)
-        self.SYSTEM_VERSION = "1.1.28"
+        self.SYSTEM_VERSION = "1.1.29"
 
         # Note: PICTURE_CAPTURE_INTERVAL is the default normal capture interval
         # When streaming starts, it's changed to STREAMING_CAPTURE_INTERVAL
